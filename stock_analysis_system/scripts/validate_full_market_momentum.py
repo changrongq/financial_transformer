@@ -52,9 +52,16 @@ def _resolve_db() -> str:
 
 
 def load_data(db: str):
+    """加载数据。
+
+    ⚠️ 重要：stock_data 的「成交额」字段在 2024-10-11 ~ 2026-03-31 之间是空的（18个月）！
+       但「成交量」字段完整。所以成交额 = 收盘价 × 成交量 兜底估算（单位：元）。
+       这是本脚本发现的数据质量问题，已在此修正。
+    """
     conn = sqlite3.connect(db)
     price = pd.read_sql_query(
-        "SELECT stock_code, [日期] AS date, [收盘] AS close, [成交额] AS amount FROM stock_data",
+        "SELECT stock_code, [日期] AS date, [收盘] AS close, "
+        "[成交额] AS amount, [成交量] AS volume FROM stock_data",
         conn,
     )
     bi = pd.read_sql_query("SELECT stock_code, 名称 FROM stock_basic_info", conn)
@@ -64,10 +71,19 @@ def load_data(db: str):
     price["stock_code"] = price["stock_code"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
     price["close"] = pd.to_numeric(price["close"], errors="coerce")
     price["amount"] = pd.to_numeric(price["amount"], errors="coerce")
+    price["volume"] = pd.to_numeric(price["volume"], errors="coerce")
     price = price.dropna(subset=["close"])
     # 剔除脏代码（None/空/非6位）
     price = price[price["stock_code"].str.len() == 6]
     price = price.sort_values(["stock_code", "date"]).reset_index(drop=True)
+
+    # 成交额兜底：缺失时用 收盘价 × 成交量 估算
+    n_missing = int(price["amount"].isna().sum())
+    if n_missing > 0:
+        est = price["close"] * price["volume"]
+        price["amount"] = price["amount"].fillna(est)
+        print(f"  [数据修正] 成交额缺失 {n_missing:,} 行，已用 收盘价×成交量 估算")
+    price["amount"] = price["amount"].fillna(0.0)
 
     bi["stock_code"] = bi["stock_code"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
     bi = bi[bi["stock_code"].str.len() == 6]
@@ -96,7 +112,14 @@ def stats(equity: pd.Series) -> dict:
 
 
 def backtest(price, bi, *, mom_window, top_pct, max_picks, hold_days,
-             min_amount, cost, limit_filter, use_timing, timing_window):
+             min_amount, cost, limit_filter, use_timing, timing_window,
+             max_day_ret=None, min_day_ret=None):
+    """回测。
+
+    max_day_ret / min_day_ret: 豆包建议的「次强梯队」方案 ——
+      跳过当日涨幅 >= max_day_ret 的标的（涨停买不进），
+      只从当日涨幅处于 [min_day_ret, max_day_ret) 的"可成交"标的里选。
+    """
     # 宽表
     pivot = price.pivot_table(index="date", columns="stock_code", values="close", aggfunc="first")
     amt = price.pivot_table(index="date", columns="stock_code", values="amount", aggfunc="first")
@@ -156,6 +179,14 @@ def backtest(price, bi, *, mom_window, top_pct, max_picks, hold_days,
                     if limit_filter:
                         today_ret = rets_v.loc[d]
                         m = m[today_ret.reindex(m.index).fillna(0) < 0.095]
+                    # 豆包的「次强梯队」：只从可成交区间选
+                    if max_day_ret is not None or min_day_ret is not None:
+                        today_ret2 = rets_v.loc[d].reindex(m.index).fillna(0)
+                        if max_day_ret is not None:
+                            m = m[today_ret2 < max_day_ret]
+                        if min_day_ret is not None:
+                            today_ret2 = rets_v.loc[d].reindex(m.index).fillna(0)
+                            m = m[today_ret2 >= min_day_ret]
                     if len(m) > 0:
                         n = max(int(len(m) * top_pct), 3)
                         if max_picks > 0:
@@ -194,11 +225,20 @@ def main() -> None:
     print(f"剔除 ST: {int(bi['名称'].astype(str).str.contains('ST|退', na=False).sum())} 只")
 
     scenarios = [
-        ("买入持有(全市场等权)", dict(use_timing=False, limit_filter=False, cost=0.0, top_pct=1.0, max_picks=0)),
         ("纯动量(无择时)", dict(use_timing=False, limit_filter=False, cost=args.cost)),
         ("纯动量+涨停过滤", dict(use_timing=False, limit_filter=True, cost=args.cost)),
         ("择时+动量", dict(use_timing=True, limit_filter=False, cost=args.cost)),
         ("择时+动量+涨停过滤", dict(use_timing=True, limit_filter=True, cost=args.cost)),
+        # === 豆包建议的「次强梯队」：跳过涨幅>8%，从3%-7%可成交区间选 ===
+        ("[豆包]次强梯队 3-7%", dict(use_timing=False, limit_filter=False, cost=args.cost,
+                                      min_day_ret=0.03, max_day_ret=0.07)),
+        ("[豆包]择时+次强梯队", dict(use_timing=True, limit_filter=False, cost=args.cost,
+                                      min_day_ret=0.03, max_day_ret=0.07)),
+        # 只避开涨停，不限下限
+        ("[豆包]只避涨停(<8%)", dict(use_timing=False, limit_filter=False, cost=args.cost,
+                                      max_day_ret=0.08)),
+        ("[豆包]择时+只避涨停", dict(use_timing=True, limit_filter=False, cost=args.cost,
+                                      max_day_ret=0.08)),
     ]
 
     common = dict(
@@ -212,6 +252,21 @@ def main() -> None:
 
     results = {}
     curves = {}
+
+    # === 基准：全市场等权买入持有（每日横截面等权收益累乘，不走选股逻辑）===
+    pivot_all = price.pivot_table(index="date", columns="stock_code", values="close", aggfunc="first").sort_index()
+    rets_all = pivot_all.pct_change(fill_method=None)
+    bh_ret = rets_all.mean(axis=1).fillna(0.0)
+    bh_eq = (1 + bh_ret).cumprod()
+    bh_stats = stats(bh_eq)
+    bh_stats["trades"] = 0
+    results["买入持有(全市场等权)"] = bh_stats
+    curves["买入持有(全市场等权)"] = bh_eq
+    print(
+        f"{'买入持有(全市场等权)':<24}{bh_stats['total_return']*100:>11.1f}%{bh_stats['annual_return']*100:>9.1f}%"
+        f"{bh_stats['max_drawdown']*100:>10.1f}%{bh_stats['sharpe']:>8.2f}{bh_stats['calmar']:>9.2f}{0:>6}"
+    )
+
     for name, kw in scenarios:
         params = dict(common)
         params.update(kw)
@@ -228,14 +283,19 @@ def main() -> None:
     print("=" * 90)
 
     # 逐年收益
-    print("\n逐年收益：")
-    print(f"{'方案':<24}" + "".join(f"{y:>10}" for y in range(2024, 2027)))
-    all_years = sorted({d.year for d in curves["纯动量(无择时)"].index if d.year >= 2024})
-    print(f"{'':<24}" + "".join(f"{y:>10}" for y in all_years))
-    for name in ["买入持有(全市场等权)", "纯动量(无择时)", "择时+动量+涨停过滤"]:
+    print("\n逐年收益（按自然年，年内净值首尾比）：")
+    all_years = sorted({d.year for d in curves["纯动量(无择时)"].index})
+    print(f"{'方案':<24}" + "".join(f"{y:>10}" for y in all_years))
+    for name in ["买入持有(全市场等权)", "纯动量(无择时)", "择时+动量", "择时+动量+涨停过滤"]:
         eq = curves[name]
-        yearly = eq.groupby(eq.index.year).apply(lambda s: s.iloc[-1] / s.iloc[0] - 1)
-        print(f"{name:<24}" + "".join(f"{yearly.get(y, np.nan)*100:>9.1f}%" for y in all_years))
+        cells = []
+        for y in all_years:
+            s = eq[eq.index.year == y]
+            if len(s) < 2:
+                cells.append(f"{'-':>10}")
+            else:
+                cells.append(f"{(s.iloc[-1] / s.iloc[0] - 1) * 100:>9.1f}%")
+        print(f"{name:<24}" + "".join(cells))
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = RESULTS_DIR / "full_market_momentum_validation.json"
