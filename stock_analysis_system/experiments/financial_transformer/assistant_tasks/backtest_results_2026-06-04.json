@@ -1,0 +1,10 @@
+{
+  "micro_mainline": {
+    "status": "error",
+    "error": "指定区间内没有可用于回测的 Transformer 多任务预测。"
+  },
+  "filtered_v5": {
+    "status": "error",
+    "error": "指定区间内没有可用于回测的 Transformer 多任务预测。"
+  }
+}

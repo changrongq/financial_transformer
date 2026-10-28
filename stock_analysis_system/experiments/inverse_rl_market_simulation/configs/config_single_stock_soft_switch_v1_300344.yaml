@@ -1,0 +1,19 @@
+databases:
+  trade_db:
+  root_config_path: ../../../config.yaml
+
+experiment:
+  stock_code: "300344"
+  start_date:
+  end_date: "2026-05-27"
+  window_days: 120
+  stability_window_days: 60
+  min_history_days: 80
+
+optimization:
+  random_seed: 7
+  n_trials: 80
+  search_space: soft_switch_v1
+
+results:
+  results_dir: ../results/single_stock_soft_switch_v1_300344_recent

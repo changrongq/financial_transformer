@@ -1,0 +1,19 @@
+databases:
+  trade_db:
+  root_config_path: ../../../config.yaml
+
+experiment:
+  stock_code: "000001"
+  start_date:
+  end_date: "2026-05-27"
+  window_days: 120
+  stability_window_days: 60
+  min_history_days: 80
+
+optimization:
+  random_seed: 17
+  n_trials: 24
+  search_space: soft_switch_v2_directional_probe
+
+results:
+  results_dir: ../results/single_stock_soft_switch_v2_directional_probe_000001_recent

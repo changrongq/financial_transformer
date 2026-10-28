@@ -1,0 +1,78 @@
+version: 1
+description: "Nested validation plan for micro-only transformer experiments using latest data through 2026-04-16. This file is a design skeleton and is not consumed by current train.py yet."
+
+data:
+  latest_trade_date: "2026-04-16"
+  trade_db: "../../../stock_history.db"
+  market_cap_db: "../../../market_cap_full.db"
+  layer_filter: "micro"
+  max_stocks: 200
+
+outer_time_rolling:
+  mode: "expanding_train_fixed_val_test"
+  train_span_hint: "~8 months"
+  val_span_hint: "~2 months"
+  test_span_hint: "~1 month"
+  step_hint: "~1 month"
+  windows:
+    - name: "window_a"
+      train_end: "2025-08-31"
+      val_end: "2025-10-31"
+      test_end: "2025-11-30"
+    - name: "window_b"
+      train_end: "2025-09-30"
+      val_end: "2025-11-30"
+      test_end: "2025-12-31"
+    - name: "window_c"
+      train_end: "2025-10-31"
+      val_end: "2025-12-31"
+      test_end: "2026-01-31"
+    - name: "window_d"
+      train_end: "2025-11-30"
+      val_end: "2026-01-31"
+      test_end: "2026-02-28"
+    - name: "window_e"
+      train_end: "2025-12-31"
+      val_end: "2026-02-28"
+      test_end: "2026-03-31"
+    - name: "window_f"
+      train_end: "2026-01-31"
+      val_end: "2026-03-15"
+      test_end: "2026-04-16"
+
+inner_stock_rotation:
+  enabled: true
+  split_key: "stock_code"
+  fold_assignment: "stable_hash_mod"
+  n_folds: 5
+  evaluation_mode: "rotate_one_fold_as_inner_val"
+  leakage_rule: "stock folds rotate only inside each outer train+val window; outer test never flows back"
+
+model_selection:
+  inner_metric: "business_score"
+  inner_reduce: "mean_minus_stability_penalty"
+  stability_penalty:
+    metric: "std"
+    weight: 0.25
+  promote_rule:
+    require_positive_outer_windows_ratio: 0.66
+    require_non_negative_avg_sharpe: true
+    forbid_single_window_dependency: true
+
+candidate_structures:
+  - "config_moneyflow_v1.yaml"
+  - "config_moneyflow_fundamental_v1.yaml"
+  - "config_moneyflow_fundamental_grouped_gated_medium_v1.yaml"
+
+deprioritized_structures:
+  - "config_moneyflow_v1_grouped_gated_medium_v1.yaml"
+
+first_implementation_scope:
+  - "add nested_cv section parsing"
+  - "derive stock fold_id from stable stock_code hash"
+  - "create a dedicated nested_cv runner script"
+  - "keep threshold search separate from first-pass structure ranking"
+
+notes:
+  - "This file is a planning scaffold, not an executable training config for the current pipeline."
+  - "Pure stock-only split is intentionally not used as the outer evaluation axis because it would break time-causality."

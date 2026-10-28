@@ -1,0 +1,26 @@
+{
+  "micro_mainline": {
+    "status": "ok",
+    "signal_count": 10,
+    "trade_count": 9,
+    "total_return": 0.200758,
+    "annualized_return": 2.4766,
+    "sharpe_ratio": 10.0789,
+    "max_drawdown": -0.0135,
+    "win_rate": 0.8889,
+    "profit_factor": 15.7498,
+    "avg_hold_days": 11.4
+  },
+  "filtered_v5": {
+    "status": "ok",
+    "signal_count": 18,
+    "trade_count": 15,
+    "total_return": 0.040032,
+    "annualized_return": 0.3065,
+    "sharpe_ratio": 1.4795,
+    "max_drawdown": -0.0528,
+    "win_rate": 0.3333,
+    "profit_factor": 1.2045,
+    "avg_hold_days": 7.0
+  }
+}

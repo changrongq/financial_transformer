@@ -1,0 +1,42 @@
+{
+  "filter_full": {
+    "status": "ok",
+    "signal_count": 18,
+    "trade_count": 15,
+    "total_return": 0.040032,
+    "sharpe_ratio": 1.4795,
+    "max_drawdown": -0.0528,
+    "win_rate": 0.3333,
+    "profit_factor": 1.2045
+  },
+  "filter_old (Jan-Mar)": {
+    "status": "ok",
+    "signal_count": 18,
+    "trade_count": 15,
+    "total_return": 0.040032,
+    "sharpe_ratio": 1.4795,
+    "max_drawdown": -0.0528,
+    "win_rate": 0.3333,
+    "profit_factor": 1.2045
+  },
+  "filter_recent (Mar-Jun)": {
+    "status": "ok",
+    "signal_count": 14,
+    "trade_count": 11,
+    "total_return": 0.12729,
+    "sharpe_ratio": 4.3537,
+    "max_drawdown": -0.0274,
+    "win_rate": 0.6364,
+    "profit_factor": 3.8093
+  },
+  "micro_old": {
+    "status": "ok",
+    "signal_count": 10,
+    "trade_count": 9,
+    "total_return": 0.200758,
+    "sharpe_ratio": 10.0789,
+    "max_drawdown": -0.0135,
+    "win_rate": 0.8889,
+    "profit_factor": 15.7498
+  }
+}

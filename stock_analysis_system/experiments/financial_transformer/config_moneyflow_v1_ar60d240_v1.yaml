@@ -1,0 +1,96 @@
+databases:
+  trade_db: "../../../stock_history.db"
+  market_cap_db: "../../../market_cap_full.db"
+
+results_dir: "results/moneyflow_v1_ar60d240_v1"
+artifacts_dir: "artifacts/moneyflow_v1_ar60d240_v1"
+
+experiment:
+  stock_pool: []
+  layer_filter: "micro"
+  max_stocks: 200
+  feature_cols:
+    - "open"
+    - "close"
+    - "high"
+    - "low"
+    - "volume"
+    - "amount"
+    - "turnover_rate"
+    - "return_1d"
+    - "return_5d"
+    - "return_20d"
+    - "volatility_20d"
+    - "amount_ma5_ma20"
+    - "volume_ma5_ma20"
+    - "rsi_14"
+    - "macd"
+    - "macd_signal"
+    - "trend_strength"
+    - "close_to_high"
+    - "close_to_low"
+    - "gap_open"
+    - "market_cap_ratio"
+    - "day_of_week_sin"
+    - "day_of_week_cos"
+    - "month_sin"
+    - "month_cos"
+    - "net_mf_amount_ratio"
+    - "net_lg_amount_ratio"
+    - "net_elg_amount_ratio"
+    - "net_mf_ratio_5d"
+    - "net_lg_ratio_5d"
+    - "net_elg_ratio_5d"
+    - "mf_acceleration"
+  prediction_horizon: 5
+  target_return_threshold: 0.03
+
+multitask:
+  short_horizon: 5
+  short_threshold: 0.03
+  hold_days: 45
+  take_profit_threshold: 0.12
+  stop_loss_threshold: -0.06
+  validation_metric: "signal_future_spearman"
+  regression_loss_beta: 0.05
+  short_up_ranking_weight: 0.35
+  short_up_ranking_min_return_gap: 0.02
+  short_up_ranking_same_date_only: true
+  short_up_ranking_max_pairs_per_batch: 2048
+  task_weights:
+    short_up: 1.2
+    take_profit: 1.0
+    stop_loss: 1.0
+    max_gain: 0.5
+    max_drawdown: 0.35
+
+splits:
+  train_end: "2025-09-30"
+  val_end: "2025-12-31"
+  test_end: "2026-03-04"
+
+model:
+  seq_len: 60
+  d_model: 64
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 256
+  dropout: 0.1
+  ffn_type: "mlp"
+  position_encoding: "sinusoidal"
+
+training:
+  batch_size: 32
+  epochs: 60
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  early_stopping_patience: 10
+  gradient_clip: 1.0
+  label_smoothing: 0.05
+  time_decay_half_life_days: 240
+  recent_finetune_window_days: 60
+  recent_finetune_epochs: 5
+  recent_finetune_learning_rate_factor: 0.1
+  recent_finetune_patience: 4
+  max_zero_turnover_fill_ratio: 0.02
+  device: "cuda"

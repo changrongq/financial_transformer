@@ -1,0 +1,58 @@
+# ===== 白名单模式：只跟踪 stock_analysis_system 项目 =====
+/*/
+!stock_analysis_system/
+/*.py
+/*.pyproj
+/*.sln
+/*.exe
+/*.csv
+/*.txt
+/*.md
+/*.html
+/*.rar
+/*.sql
+/*.exe
+/*.htm
+LICENSE.*
+THIRD_PARTY_NOTICES.*
+
+# ===== 数据 / 模型 / 虚拟环境（体积大，不入库）=====
+.venv/
+venv/
+wheels/
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.pth
+*.pkl
+*.joblib
+*.rar
+*.zip
+
+# ===== 敏感信息 =====
+config/tushare_token.local
+**/tushare_token.local
+.env
+*.local
+
+# ===== 运行产物 =====
+results/
+**/results/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# ===== IDE =====
+.vscode/
+.vs/
+.idea/
+
+# ===== 临时 / 导出 =====
+*.log
+*.tmp
+*_files/
+*.html
+*.png
+*.svg
