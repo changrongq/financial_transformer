@@ -71,8 +71,8 @@ def main() -> None:
 
         strict = T.run_strict_t1(df, args.cost, 0.0, args.window, args.threshold)
         ideal = T.run_intraday_idealized(df, args.cost, 0.0, args.window, args.threshold)
-        offset = len(df) - len(strict["curve"])
-        bh = T.buy_hold_curve(df, offset)
+        offset = T.align_offset(df, len(strict["curve"]))
+        bh = T.buy_hold_curve(df, offset, cost=args.cost, slip=0.0)
 
         m = min(len(strict["curve"]), len(ideal["curve"]), len(bh))
         s_s, s_i, s_b = (T.stats(strict["curve"][:m]), T.stats(ideal["curve"][:m]),
@@ -130,8 +130,8 @@ def main() -> None:
                 if df is None:
                     continue
                 r = T.run_strict_t1(df, args.cost, 0.0, w, th)
-                off = len(df) - len(r["curve"])
-                bh = T.buy_hold_curve(df, off)
+                off = T.align_offset(df, len(r["curve"]))
+                bh = T.buy_hold_curve(df, off, cost=args.cost, slip=0.0)
                 m = min(len(r["curve"]), len(bh))
                 s_s, s_b = T.stats(r["curve"][:m]), T.stats(bh[:m])
                 a = s_s["total"] - s_b["total"]
@@ -162,14 +162,14 @@ def main() -> None:
         df = T.load_etf(db, code)
         if df is None:
             continue
-        bh = T.buy_hold_curve(df, len(df) - (len(df) - args.window - 1))
+        bh = T.buy_hold_curve(df, len(df) - (len(df) - args.window - 1), cost=args.cost, slip=0.0)
         s_b = T.stats(bh)
         line = f"{name:<14}{s_b['total']*100:>+10.1f}%"
         row = {"code": code, "name": name, "buy_hold": round(s_b["total"], 6)}
         for slip in [0.0, 0.0005, 0.001, 0.002]:
             r = T.run_strict_t1(df, args.cost, slip, args.window, args.threshold)
-            off = len(df) - len(r["curve"])
-            bh2 = T.buy_hold_curve(df, off)
+            off = T.align_offset(df, len(r["curve"]))
+            bh2 = T.buy_hold_curve(df, off, cost=args.cost, slip=slip)
             m = min(len(r["curve"]), len(bh2))
             s_s = T.stats(r["curve"][:m])
             s_b2 = T.stats(bh2[:m])
@@ -196,8 +196,8 @@ def main() -> None:
         if df is None:
             continue
         r = T.run_strict_t1(df, args.cost, 0.0, args.window, args.threshold)
-        off = len(df) - len(r["curve"])
-        bh = T.buy_hold_curve(df, off)
+        off = T.align_offset(df, len(r["curve"]))
+        bh = T.buy_hold_curve(df, off, cost=args.cost, slip=0.0)
         m = min(len(r["curve"]), len(bh))
         eq_t, eq_b = r["curve"][:m], bh[:m]
         dd = df.iloc[off:off + m].reset_index(drop=True)

@@ -115,34 +115,48 @@ def run_strict_t1(df: pd.DataFrame, cost: float = 0.0005, slip: float = 0.0,
     """【严格 T+1】T日收盘信号 → T+1开盘执行 → 持仓吃全天收益。
 
     这是唯一真实可实现的回测口径。
+
+    交易时序：
+      T 日 15:00  收盘，用 T 日及之前数据算信号 sig[T]
+      T+1 日 09:30 开盘，按 sig[T] 执行（买入/卖出）
+      T+1 日       若持仓，吃「开盘→收盘」的日内收益（买入当天）
+      T+2 日起     若持仓，每天吃全天收益（close/pre_close，含隔夜）
+
+    成本处理（滑点模型的说明）：
+      滑点 slip 按「价格偏离」建模：
+        · 买入成交价 = open × (1 + slip)
+        · 卖出成交价 = open × (1 - slip)
+      这在买入当天体现为「日内收益按偏离后的买入价折算」，
+      与「直接减 slip」有 ~s² 的二阶差异（s=0.1% 时约 0.001%），可忽略。
+
+    ⚠️ BUGFIX 记录（2026-10-29，钳星审查后修正）：
+       旧实现卖出时写 `prev_eq *= (sell / entry_price)`，
+       但持有期间已经每天累乘了 ret —— 这导致每段持仓的涨幅被【计算两次】。
+       实测后果：沪深300 在 slip=0 时被高估为 +300.2%，修正后为 +115.7%（差 184pp）。
+       修复方式：卖出时只扣卖出成本，不再重复计算价格涨幅。
     """
     d = add_signal(df, window, threshold)
     n = len(d)
 
     eq = [1.0]
-    pos = 0.0          # 当前持仓（0 或 1）
-    entry_price = None  # 若持仓，记录买入价
+    pos = 0.0
     trades = 0
 
     for i in range(1, n):
         # T-1 日的信号决定 T 日开盘的动作
         target = 1.0 if bool(d.loc[i - 1, "sig"]) else 0.0
-        o, c = float(d.loc[i, "open"]), float(d.loc[i, "close"])
-
         prev_eq = eq[-1]
 
         if target > pos:      # 空仓 → 买入（T 日开盘）
-            entry_price = o * (1 + slip)
-            prev_eq *= (1 - cost)
+            # 买入当天只吃日内（开盘→收盘），并扣买入成本+滑点
+            intra = float(d.loc[i, "intraday"])   # close/open - 1
+            prev_eq *= (1.0 + intra - slip - cost)
             trades += 1
-            # 买入当天只吃日内（开盘到收盘）
-            prev_eq *= (c / entry_price) if entry_price > 0 else 1.0
         elif target < pos:    # 持仓 → 卖出（T 日开盘）
-            sell = o * (1 - slip)
-            prev_eq *= (sell / entry_price) if entry_price else 1.0
-            prev_eq *= (1 - cost)
+            # 卖出当天不参与收益，只扣卖出成本+滑点
+            # ⚠️ 不再乘 (sell/entry_price)，避免与持有期日内收益重复计算
+            prev_eq *= (1.0 - slip - cost)
             trades += 1
-            entry_price = None
         elif target > 0:      # 继续持有：吃全天（用 pre_close 算，跨拆分连续）
             prev_eq *= (1.0 + float(d.loc[i, "ret"]))
 
@@ -172,23 +186,52 @@ def run_intraday_idealized(df: pd.DataFrame, cost: float = 0.0005, slip: float =
     return {"curve": np.array(eq[1:]), "days": n - 1, "df": d}
 
 
-def buy_hold_curve(df: pd.DataFrame, start_idx: int = 0) -> np.ndarray:
-    """买入持有：从 start_idx+1 开盘买入，一直持有。
+def buy_hold_curve(df: pd.DataFrame, start_idx: int = 0,
+                   cost: float = 0.0, slip: float = 0.0) -> np.ndarray:
+    """买入持有：在 df[start_idx] 当天开盘买入，一直持有到末尾。
 
-    用复权日收益（ret = close/pre_close - 1）累乘，避免拆分造成假收益。
-    首日用 open->close 的日内收益。
+    与 run_strict_t1 的收益口径严格一致：
+      · 买入当天：吃日内收益（close/open - 1），扣 slip + cost
+      · 之后每天：吃全天收益（close/pre_close - 1）
+
+    返回的数组长度 = len(df) - start_idx，元素 k 表示「df[start_idx+k] 收盘时的净值」。
+    这样与 run_strict_t1 的 curve 可以做逐点比较（前提是起点相同）。
+
+    ⚠️ BUGFIX 记录（2026-10-29，钳星审查后修正，两处）：
+      1) 旧实现从 start_idx+1 买入 → 买点比择时晚一天
+      2) 旧实现 eq=[1.0] 后 append 首日 → 返回数组首元素恒为 1.0，
+         与 run_strict_t1 的 curve（eq[1:]）语义错位
+       修正：首日直接作为第 0 个元素，不再冗余的 1.0 前缀
     """
     d = df.reset_index(drop=True)
-    eq = [1.0]
-    if start_idx + 1 >= len(d):
-        return np.array(eq)
-    # 首日：开盘买入，吃当天日内
-    first = 1.0 + float(d.loc[start_idx + 1, "intraday"])
-    eq.append(first)
+    if start_idx >= len(d):
+        return np.array([1.0])
+
+    # 首日：开盘买入，吃日内，扣成本
+    eq = [1.0 + float(d.loc[start_idx, "intraday"]) - slip - cost]
+
     # 之后：吃每天的复权日收益
-    for i in range(start_idx + 2, len(d)):
+    for i in range(start_idx + 1, len(d)):
         eq.append(eq[-1] * (1.0 + float(d.loc[i, "ret"])))
     return np.array(eq)
+
+
+def align_offset(df: pd.DataFrame, curve_len: int) -> int:
+    """计算择时曲线对应的原始 df 起始行。
+
+    推导：
+      run_strict_t1 内：d = add_signal(df)  # 丢掉前 dropped 行
+                        curve = eq[1:]      # 长度 = len(d) - 1
+                        curve[0] ↔ d[1]
+      d 丢掉的行数 dropped = len(df) - len(d)
+      所以 d[1] ↔ df[dropped + 1]
+      而 len(curve) = len(d) - 1  =>  len(d) = len(curve) + 1
+      dropped = len(df) - len(curve) - 1
+      起始行 = dropped + 1 = len(df) - len(curve)
+
+    >>> 结论：start_idx = len(df) - curve_len
+    """
+    return max(0, len(df) - curve_len)
 
 
 def stats(curve: np.ndarray) -> dict:
@@ -213,7 +256,7 @@ if __name__ == "__main__":
             continue
         strict = run_strict_t1(df)
         ideal = run_intraday_idealized(df)
-        off = len(df) - len(strict["curve"])
+        off = align_offset(df, len(strict["curve"]))
         bh = buy_hold_curve(df, off)
 
         # 对齐长度
