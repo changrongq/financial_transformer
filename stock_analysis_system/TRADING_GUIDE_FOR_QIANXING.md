@@ -19,7 +19,7 @@ v3.0 说"择时只能降波动，不能提收益"——那是基于 **2 年**数
 
 **19/20 组参数跑赢买入持有**（2 年数据时只有 4/20）。
 
-而且发现了**收益的真正来源**：
+而且发现了**收益的真正来源**（详见 `OVERNIGHT_INTRADAY_DISCOVERY.md`）：
 
 | 收益来源 | 14 年年化 |
 |---|---|
@@ -37,6 +37,43 @@ v3.0 说"择时只能降波动，不能提收益"——那是基于 **2 年**数
 | **转持有当日**（买入） | +0.078% | +0.825% | **+0.904%** |
 
 **策略赚的是"避开隔夜下跌 + 捕捉日内上涨"的钱。**
+
+### 这规律在 11/11 个标的上都成立（不是偶然）
+
+| 标的 | 隔夜 | 日内 |
+|---|---|---|
+| 上证50ETF（20.5年） | -14.17% | +23.22% |
+| 沪深300ETF（14.4年） | -10.76% | +15.76% |
+| 中证500ETF（13.5年） | -12.85% | +32.30% |
+| 创业板ETF（14.8年） | **-23.80%** | **+42.32%** |
+| 中证1000ETF（9.9年） | -11.52% | +24.80% |
+| 科创50ETF（5.9年） | -17.19% | +19.16% |
+| 上证综指（20.8年） | -18.78% | +30.07% |
+| 沪深300指数（20.8年） | -14.93% | +26.17% |
+| 中证500指数（20.8年） | -18.19% | +34.83% |
+| 中证1000指数（20.8年） | -23.74% | +44.73% |
+| 创业板指（16.3年） | -14.43% | +24.21% |
+
+**11/11 全部符合「隔夜负、日内正」。大小盘、成长价值、ETF指数都成立。**
+
+沪深300指数 20.8 年分年度：**隔夜为负 19/21 年 = 90%**（只有 2019、2023 例外）。
+
+### ⚠️ 但不要想着"每天开盘买收盘卖"
+
+既然日内赚 +15.92%，能不能每天做日内？
+
+**不行，成本会吃掉一切：**
+
+| 单边成本 | 沪深300ETF 年化 |
+|---|---|
+| 0%（理论） | +15.76% |
+| 0.02% | +5.00% |
+| **0.03%** | **-0.00%（归零）** |
+| 0.05% | -9.30% |
+
+**临界点只有 0.032%。** 每天 488 次交易的成本太恐怖。
+
+**正确做法就是择时：把交易次数从 488次/年 降到 34次/年。**
 
 ---
 
@@ -422,6 +459,8 @@ cd d:\qcr\Stock\stock_analysis_system
 | `verify_timing_next_open.py` | `scripts/` |
 | **`validate_timing_on_etf_14y.py`** | `scripts/` |
 | **`fetch_etf_history.py`** | `scripts/` |
+| **`analyze_overnight_intraday.py`** | `scripts/` |
+| **`test_intraday_only_strategy.py`** | `scripts/` |
 | **`rl_timing_v3_etf.py`** | `scripts/` |
 | `rl_timing_v2.py` | `scripts/` |
 | `verify_rl_robustness.py` | `scripts/` |
@@ -604,14 +643,15 @@ cd d:\qcr\Stock\stock_analysis_system
 | 想看什么 | 打开哪个 |
 |---|---|
 | 完整实验记录（给豆包看的） | `EXPERIMENT_FULL_RECORD_FOR_DOUBAO.md` |
+| **隔夜/日内重大发现** | **`OVERNIGHT_INTRADAY_DISCOVERY.md`** |
 | 模型塌缩诊断 | `MICRO_MODEL_DIAGNOSIS_REPORT.md` |
 | 日历因子研究 | `CALENDAR_FACTOR_REPORT.md` |
 | ETF择时说明 | `ETF_TIMING_USER_GUIDE.md` |
 | 台风模型回测 | `TYPHOON_BACKTEST_NOTE.md` |
 | 项目总览 | `PROJECT_README.md` |
 | 今日择时信号 | `results/regime_timing_daily_signal.json` |
-| **14年ETF验证（最新）** | `results/timing_etf14y_510300_SH.json` |
-| 执行时点对比（A/B/C） | `results/timing_execution_price.json` |
+| **14年ETF验证（最新）** | `results/timing_etf14y_510300_SH.json` || **隔夜/日内结构分析** | `results/overnight_intraday_analysis.json` |
+| **纯日内策略测试** | `results/intraday_only_strategy.json` || 执行时点对比（A/B/C） | `results/timing_execution_price.json` |
 | 20组参数稳健性（2年） | `results/timing_next_open_verification.json` |
 | 换手/成本诊断 | `results/timing_churn_and_cost.json` |
 | RL v1/v2 结果 | `results/rl_timing_v2.json`, `results/rl_strict_verification.json` |
