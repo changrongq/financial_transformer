@@ -55,13 +55,38 @@ cd d:\qcr\Stock\stock_analysis_system
 .venv\Scripts\python.exe experiments\financial_transformer\daily_regime_timing_signal.py
 ```
 
-**只看两个数：**
+**脚本会自动先拉当天数据**（首次跑可能慢 10-30 秒），然后计算信号。
+
+只看两个数：
 
 ```
-日期: 2026-10-28
-大盘近 10 日均收益: -1.125%      ← 看这个
-当日市场收益: -4.898%
+日期: 2026-10-29                ← 先确认是今天！
+大盘近 10 日均收益: -1.101%      ← 看这个
+当日市场收益: -2.621%
 择时信号: [CASH] 空仓，不持有 ETF   ← 和这个
+```
+
+### 重要：先确认日期是对的
+
+**如果输出的日期不是今天**，说明数据没拉到。可能原因：
+
+| 原因 | 怎么办 |
+|---|---|
+| 还没到收盘（15:00 前） | 等收盘后再跑 |
+| 今天不是交易日 | 用上一个交易日的信号 |
+| tushare 数据延迟 | 等半小时再试，或手动刷新 |
+
+**绝对不要用旧日期的信号交易。**
+
+```powershell
+# 检查数据新鲜度（不拉取）
+.venv\Scripts\python.exe scripts\refresh_market_data.py --check-only
+
+# 手动刷新
+.venv\Scripts\python.exe scripts\refresh_market_data.py
+
+# 跳过刷新直接算（数据已确认最新时用）
+.venv\Scripts\python.exe experiments\financial_transformer\daily_regime_timing_signal.py --no-refresh
 ```
 
 ### 记录到你的表里

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -131,7 +132,25 @@ def main() -> None:
     parser.add_argument("--window", type=int, default=10, help="大盘均收益回看窗口（交易日）")
     parser.add_argument("--threshold", type=float, default=0.0, help="空仓阈值（均收益 < 此值则空仓）")
     parser.add_argument("--no-save", action="store_true", help="只打印，不落盘")
+    parser.add_argument("--no-refresh", action="store_true",
+                        help="跳过数据刷新（默认会先拉今天的数据）")
+    parser.add_argument("--refresh-days", type=int, default=10,
+                        help="最多往前检查几个工作日")
     args = parser.parse_args()
+
+    # ===== 第一步：刷新数据到最新交易日 =====
+    if not args.no_refresh:
+        sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+        try:
+            from refresh_market_data import refresh as _refresh
+            res = _refresh(max_lookback=args.refresh_days, verbose=True)
+            if not res.get("ok"):
+                print(f"[提示] 数据刷新未完成: {res.get('message')}")
+                print("[提示] 将使用数据库现有数据计算信号")
+            print()
+        except Exception as e:
+            print(f"[提示] 数据刷新失败（{type(e).__name__}: {e}）")
+            print("[提示] 将使用数据库现有数据计算信号\n")
 
     trade_db = _resolve_trade_db()
     daily = _load_market_daily(trade_db)
