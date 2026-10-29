@@ -58,6 +58,29 @@ v3.0 说"择时只能降波动，不能提收益"——那是基于 **2 年**数
 
 沪深300指数 20.8 年分年度：**隔夜为负 19/21 年 = 90%**（只有 2019、2023 例外）。
 
+### ⭐ 这是 A 股特有，不是全球规律（已用美股港股 22 年数据验证）
+
+| 市场 | 隔夜 | 日内 |
+|---|---|---|
+| **A股 沪深300** | **-14.9%** | **+26.2%** |
+| **美股 标普500** | **+6.1%** | +2.3% |
+| **美股 纳斯达克100** | **+13.4%** | +5.2% |
+| **港股 盈富基金（恒指）** | **+4.6%** | -1.8% |
+| **港股 腾讯控股** | **+51.7%** | **-19.4%** |
+
+**美股港股是"隔夜赚、日内亏"——和 A 股完全相反。**
+
+分年度：A股隔夜为负 **19/21 年（90%）**，美股标普500 只有 **3/23 年（13%）**。
+
+**排除干扰的三重验证**（详见 `GLOBAL_OVERNIGHT_COMPARISON.md`）：
+1. **不是 ETF 折溢价**：指数比 ETF 更负（沪深300 指数 -14.9% vs ETF -10.8%）
+2. **不是某段时间的现象**：2006-2010 -16.5%、2011-15 -18.5%、2016-20 -13.8%、2021-26 -11.3%，**四个时段全负**
+3. **不是少数大跌造成**：A股隔夜**中位数**就是负的（沪深300 -3.3bp，美股 +4.9bp）
+
+**最可能的原因：T+1 制度**（当天买入不能卖，卖压全堆到次日开盘）。其次是涨跌停制度、散户结构。
+
+⚠️ **这意味着策略有"制度风险"**：如果 A 股推出 T+0，这个效应可能消失。而且效应已经在减弱（2006-2010 的 -16.5% → 2021-26 的 -11.3%）。
+
 ### ⚠️ 但不要想着"每天开盘买收盘卖"
 
 既然日内赚 +15.92%，能不能每天做日内？
@@ -461,6 +484,10 @@ cd d:\qcr\Stock\stock_analysis_system
 | **`fetch_etf_history.py`** | `scripts/` |
 | **`analyze_overnight_intraday.py`** | `scripts/` |
 | **`test_intraday_only_strategy.py`** | `scripts/` |
+| **`fetch_global_akshare.py`** | `scripts/` |
+| **`analyze_global_overnight.py`** | `scripts/` |
+| **`verify_ashare_overnight_mechanism.py`** | `scripts/` |
+| **`analyze_why_ashare_differs.py`** | `scripts/` |
 | **`rl_timing_v3_etf.py`** | `scripts/` |
 | `rl_timing_v2.py` | `scripts/` |
 | `verify_rl_robustness.py` | `scripts/` |
@@ -522,6 +549,17 @@ cd d:\qcr\Stock\stock_analysis_system
 |---|---|
 | `D:\qcr\Stock\stock_history.db` | 股价、资金流、真实换手率、8年历史日线、指数 |
 | `D:\qcr\Stock\market_cap_full.db` | 市值、十大股东、流通股本、自由流通盘 |
+
+### 数据库主要表
+
+| 表 | 内容 | 范围 |
+|---|---|---|
+| `stock_data` | 全市场个股日线 | 2024-10 ~ 至今（478天） |
+| `historical_daily` | 行业股日线 | 2019-01 ~ 2026-08（1852天） |
+| `etf_daily` | **ETF 日线（510300等6只）** | **最长 20.5 年** |
+| `index_daily` | **指数日线（沪深300等6只）** | **最长 21.7 年** |
+| `global_daily` | **美股港股（SPY/腾讯等10只）** | **平均 22 年** |
+| `real_turnover_rate` | 真实换手率 | 227万条 |
 
 ### 更新数据（信号不新鲜时跑）
 
@@ -644,6 +682,7 @@ cd d:\qcr\Stock\stock_analysis_system
 |---|---|
 | 完整实验记录（给豆包看的） | `EXPERIMENT_FULL_RECORD_FOR_DOUBAO.md` |
 | **隔夜/日内重大发现** | **`OVERNIGHT_INTRADAY_DISCOVERY.md`** |
+| **全球对照（A股特有）** | **`GLOBAL_OVERNIGHT_COMPARISON.md`** |
 | 模型塌缩诊断 | `MICRO_MODEL_DIAGNOSIS_REPORT.md` |
 | 日历因子研究 | `CALENDAR_FACTOR_REPORT.md` |
 | ETF择时说明 | `ETF_TIMING_USER_GUIDE.md` |
@@ -651,6 +690,8 @@ cd d:\qcr\Stock\stock_analysis_system
 | 项目总览 | `PROJECT_README.md` |
 | 今日择时信号 | `results/regime_timing_daily_signal.json` |
 | **14年ETF验证（最新）** | `results/timing_etf14y_510300_SH.json` || **隔夜/日内结构分析** | `results/overnight_intraday_analysis.json` |
+| **全球对照（美股/港股22年）** | `results/global_overnight_intraday.json` |
+| **A股机制验证** | `results/ashare_overnight_mechanism.json` |
 | **纯日内策略测试** | `results/intraday_only_strategy.json` || 执行时点对比（A/B/C） | `results/timing_execution_price.json` |
 | 20组参数稳健性（2年） | `results/timing_next_open_verification.json` |
 | 换手/成本诊断 | `results/timing_churn_and_cost.json` |
