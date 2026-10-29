@@ -76,7 +76,21 @@ def _resolve_db() -> str:
 
 
 def load_etf(db: str, code: str, window: int = 10) -> pd.DataFrame:
-    """加载 ETF 并计算择时信号（用 ETF 自身的 10 日均收益，避免口径混杂）。"""
+    """加载 ETF 并计算择时信号。
+
+    ⚠️ 口径声明（GUIDE 审查问题1）：
+       本脚本的择时信号用【ETF 自身】的 N 日均收益，
+       而实盘脚本 daily_regime_timing_signal.py 用【全市场等权】N 日均收益。
+       这是两套不同信号！
+
+       为什么不一样：
+         · 实盘：全市场等权，覆盖 5000+ 只股票，信号更平滑、代表性强
+         · 本 RL 实验：只用单一 ETF 价格，因为要模拟"自己能否学到执行细节"，
+           用同一资产避免口径混杂
+
+       这意味着：本脚本的 RL 结论不能直接推广到实盘信号上。
+       如果要验证 RL 在实盘信号上的效果，需改用 stock_data 计算信号。
+    """
     conn = sqlite3.connect(db)
     df = pd.read_sql_query(
         "SELECT trade_date, open, high, low, close FROM etf_daily WHERE ts_code=? ORDER BY trade_date",
@@ -138,7 +152,9 @@ def rollout(df: pd.DataFrame, local_idx, cost: float, mu, sd, policy=None,
 
     eq = 1.0
     curve = []
-    pos = 1.0  # 起始假设满仓
+    pos = 1.0  # ⚠️ 起始假设满仓（GUIDE审查问题2）
+    # 为什么从满仓开始：回测第一天之前就已经持有，保守假设。
+    # 影响：首日可能多一次卖出成本；对基线和 RL 同样作用，方向性可抵消。
     acts = []
     probs_log = []
 

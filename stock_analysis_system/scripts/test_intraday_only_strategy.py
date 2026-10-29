@@ -145,31 +145,45 @@ def main() -> None:
         print(f"\n  对比 买入持有: 累计 {mb['total']*100:+.1f}%  年化 {mb['ann']*100:+.2f}%  "
               f"回撤 {mb['dd']*100:.1f}%  夏普 {mb['sharpe']:.2f}")
 
-        # 对比：择时（T+1开盘执行，用10日均线）
-        d = df.copy()
-        d["mean"] = d["ret"].rolling(10, min_periods=3).mean()
-        d["sig"] = d["mean"] >= 0
-        d = d.dropna(subset=["mean"]).reset_index(drop=True)
-        eq_t = [1.0]
-        pos = 0.0
-        for i in range(1, len(d)):
-            target = 1.0 if d.loc[i - 1, "sig"] else 0.0
-            r = float(d.loc[i, "intraday"]) if target > 0 else 0.0
-            trade = abs(target - pos)
-            eq_t.append(eq_t[-1] * (1 + r - trade * 0.0005))
-            pos = target
-        eq_t = np.array(eq_t[1:])
-        mt = metrics(eq_t)
-        print(f"  对比 择时(T+1开盘): 累计 {mt['total']*100:+.1f}%  年化 {mt['ann']*100:+.2f}%  "
-              f"回撤 {mt['dd']*100:.1f}%  夏普 {mt['sharpe']:.2f}")
-        print(f"       （每天只吃日内，但只在HOLD日持仓，成本低得多）")
+        # 对比：择时 —— 用标准引擎的【严格 T+1】口径
+        # （GUIDE 审查问题5：原实现用 close/open-1 只吃日内，与 v5.0 口径不一致）
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import timing_engine as _TE
+
+            _etf_df = _TE.load_etf(db, code) if table == "etf_daily" else None
+            if _etf_df is not None:
+                _strict = _TE.run_strict_t1(_etf_df, cost=0.0005, slip=0.0,
+                                            window=10, threshold=0.0)
+                _off = len(_etf_df) - len(_strict["curve"])
+                _bh_curve = _TE.buy_hold_curve(_etf_df, _off)
+                _m = min(len(_strict["curve"]), len(_bh_curve))
+                _s_strict = _TE.stats(_strict["curve"][:_m])
+                _s_bh = _TE.stats(_bh_curve[:_m])
+                print(f"\n  对比 择时(严格T+1, 万5成本): 累计 {_s_strict['total']*100:+.1f}%  "
+                      f"年化 {_s_strict['ann']*100:+.2f}%  回撤 {_s_strict['dd']*100:.1f}%  "
+                      f"夏普 {_s_strict['sharpe']:.2f}")
+                print(f"  对比 买入持有(严格T+1):      累计 {_s_bh['total']*100:+.1f}%  "
+                      f"年化 {_s_bh['ann']*100:+.2f}%  回撤 {_s_bh['dd']*100:.1f}%  "
+                      f"夏普 {_s_bh['sharpe']:.2f}")
+                print(f"       （严格 T+1：T日信号→T+1开盘执行→持仓吃全天收益，含隔夜）")
+                mt = _s_strict
+                mb = _s_bh
+            else:
+                raise RuntimeError("非 ETF 标的，无严格T+1对照")
+        except Exception as _e:
+            print(f"\n  对比 择时: 无法用标准引擎计算（{type(_e).__name__}: {_e}）")
+            mt = {"total": np.nan, "ann": np.nan, "dd": np.nan, "sharpe": np.nan}
 
         all_out[name] = {
             "days": len(df), "intraday_ann": round(ann0, 6),
             "breakeven_cost": round(breakeven, 6),
             "grid": rows,
-            "buy_hold": {k: round(v, 6) for k, v in mb.items()},
-            "timing_next_open": {k: round(v, 6) for k, v in mt.items()},
+            "buy_hold": {k: (round(v, 6) if isinstance(v, (int, float)) and not pd.isna(v) else None)
+                         for k, v in mb.items()},
+            "timing_strict_t1": {k: (round(v, 6) if isinstance(v, (int, float)) and not pd.isna(v) else None)
+                                 for k, v in mt.items()},
         }
 
     # ===== 总结 =====
@@ -177,8 +191,14 @@ def main() -> None:
     print("总结")
     print("=" * 96)
     print("  1. 「每天日内交易」理论上能吃到大额日内收益，但每日2次成本极高")
-    print("  2. 成本临界点约 0.05%~0.1% 单边（ETF 刚好在边缘）")
-    print("  3. 更优方案：择时（只在HOLD日吃日内），交易次数从 488次/年 降到约 34次/年")
+    print("  2. 成本临界点约 0.03%~0.08% 单边（ETF 实际成本 0.03-0.05%，正好卡在死亡线）")
+    print("  3. 更优方案：择时（T日信号→T+1开盘执行，吃全天收益）")
+    print("     交易次数从 488次/年 降到约 34次/年，成本降低 14 倍")
+    print()
+    print("  ⚠️ 口径说明（GUIDE 审查问题5）：")
+    print("     本脚本主结论（日内交易成本太高）用『每天开盘买收盘卖』口径，")
+    print("     但『对比择时』一格已改用标准引擎的【严格 T+1】口径，")
+    print("     与 validate_timing_multi_v2.py 的最终数字一致。")
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out = RESULTS_DIR / "intraday_only_strategy.json"
