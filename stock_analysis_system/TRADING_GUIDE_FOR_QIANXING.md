@@ -79,6 +79,20 @@ v3.0 说"择时只能降波动，不能提收益"——那是基于 **2 年**数
 
 **最可能的原因：T+1 制度**（当天买入不能卖，卖压全堆到次日开盘）。其次是涨跌停制度、散户结构。
 
+### 个股层面验证：换手率越高，效应越强（这直接证明了 T+1 假说）
+
+| 换手率分组 | 隔夜 | 日内 |
+|---|---|---|
+| 最低 20% | -6.91bp | +6.17bp |
+| 第2组 | -7.91bp | +11.04bp |
+| 第3组 | -9.32bp | +14.95bp |
+| 第4组 | -11.48bp | +19.54bp |
+| **最高 20%** | **-17.93bp** | **+30.58bp** |
+
+**换手率最高的股票，日内收益是低换手组的 5 倍。** 这正是 T+1 制度的直接后果：高换手=散户频繁交易=次日开盘集中抛售。
+
+个股符合比例：**4197/5684 = 73.8%**（86.6% 个股隔夜为负）。
+
 ⚠️ **这意味着策略有"制度风险"**：如果 A 股推出 T+0，这个效应可能消失。而且效应已经在减弱（2006-2010 的 -16.5% → 2021-26 的 -11.3%）。
 
 ### ⚠️ 但不要想着"每天开盘买收盘卖"
@@ -95,6 +109,15 @@ v3.0 说"择时只能降波动，不能提收益"——那是基于 **2 年**数
 | 0.05% | -9.30% |
 
 **临界点只有 0.032%。** 每天 488 次交易的成本太恐怖。
+
+**个股更不行**（高换手股票虽然日内更高，但成本也更高）：
+
+| 策略 | 盈亏平衡成本 | 实际成本 | 结论 |
+|---|---|---|---|
+| ETF 日内 | 0.032% | 0.03-0.05% | 边缘 |
+| **个股日内（高换手20%）** | **0.114%** | 0.10-0.20% | **不可行** |
+
+而且个股还有额外问题：6.6% 交易日开盘涨停买不进、半年收益衰减 59%。
 
 **正确做法就是择时：把交易次数从 488次/年 降到 34次/年。**
 
@@ -488,6 +511,8 @@ cd d:\qcr\Stock\stock_analysis_system
 | **`analyze_global_overnight.py`** | `scripts/` |
 | **`verify_ashare_overnight_mechanism.py`** | `scripts/` |
 | **`analyze_why_ashare_differs.py`** | `scripts/` |
+| **`analyze_stock_overnight_cross_section.py`** | `scripts/` |
+| **`test_high_turnover_intraday.py`** | `scripts/` |
 | **`rl_timing_v3_etf.py`** | `scripts/` |
 | `rl_timing_v2.py` | `scripts/` |
 | `verify_rl_robustness.py` | `scripts/` |
@@ -683,6 +708,7 @@ cd d:\qcr\Stock\stock_analysis_system
 | 完整实验记录（给豆包看的） | `EXPERIMENT_FULL_RECORD_FOR_DOUBAO.md` |
 | **隔夜/日内重大发现** | **`OVERNIGHT_INTRADAY_DISCOVERY.md`** |
 | **全球对照（A股特有）** | **`GLOBAL_OVERNIGHT_COMPARISON.md`** |
+| **个股横截面验证** | **`STOCK_OVERNIGHT_CROSS_SECTION.md`** |
 | 模型塌缩诊断 | `MICRO_MODEL_DIAGNOSIS_REPORT.md` |
 | 日历因子研究 | `CALENDAR_FACTOR_REPORT.md` |
 | ETF择时说明 | `ETF_TIMING_USER_GUIDE.md` |
@@ -692,6 +718,8 @@ cd d:\qcr\Stock\stock_analysis_system
 | **14年ETF验证（最新）** | `results/timing_etf14y_510300_SH.json` || **隔夜/日内结构分析** | `results/overnight_intraday_analysis.json` |
 | **全球对照（美股/港股22年）** | `results/global_overnight_intraday.json` |
 | **A股机制验证** | `results/ashare_overnight_mechanism.json` |
+| **个股横截面分析** | `results/stock_overnight_cross_section.json` |
+| **高换手日内策略测试** | `results/high_turnover_intraday.json` |
 | **纯日内策略测试** | `results/intraday_only_strategy.json` || 执行时点对比（A/B/C） | `results/timing_execution_price.json` |
 | 20组参数稳健性（2年） | `results/timing_next_open_verification.json` |
 | 换手/成本诊断 | `results/timing_churn_and_cost.json` |
