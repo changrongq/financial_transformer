@@ -75,7 +75,7 @@ def load_prices(db: str, table: str, code: str) -> pd.DataFrame | None:
     conn = sqlite3.connect(db)
     try:
         df = pd.read_sql_query(
-            f"SELECT trade_date, open, high, low, close FROM {table} WHERE ts_code=? ORDER BY trade_date",
+            f"SELECT trade_date, open, high, low, close, pre_close FROM {table} WHERE ts_code=? ORDER BY trade_date",
             conn, params=(code,))
     except Exception:
         conn.close()
@@ -85,7 +85,7 @@ def load_prices(db: str, table: str, code: str) -> pd.DataFrame | None:
         return None
 
     df["date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d", errors="coerce")
-    for c in ["open", "high", "low", "close"]:
+    for c in ["open", "high", "low", "close", "pre_close"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["date", "open", "close"])
     df = df[(df["open"] > 0) & (df["close"] > 0)]
@@ -94,7 +94,7 @@ def load_prices(db: str, table: str, code: str) -> pd.DataFrame | None:
         return None
 
     df["ret"] = df["close"].pct_change(fill_method=None)
-    df["gap"] = df["open"] / df["close"].shift(1) - 1.0
+    df["gap"] = df["open"] / df["pre_close"] - 1.0
     df["intraday"] = df["close"] / df["open"] - 1.0
     return df.dropna(subset=["ret"]).reset_index(drop=True)
 

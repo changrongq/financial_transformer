@@ -1,25 +1,35 @@
 """验证：能不能用"高换手股票 + 只做日内"赚到钱？
 
-发现：
-  换手率最高20%的股票：隔夜 -17.93bp，日内 +30.58bp
-  换手率最低20%的股票：隔夜 -6.91bp，日内 +6.17bp
-  → 高换手股票的日内收益是低换手的 5 倍
+⚠️⚠️ 重要：本脚本的结论目前【不可信】，原因是底层成交额数据有问题。
 
-诱人想法：
-  如果只在高换手股票上做「开盘买、收盘卖」，能吃到 +30.58bp/天。
+知微审查第4条指出了前视信息问题（已修），但进一步诊断发现更严重的问题：
 
-但必须验证的陷阱：
-  T1. 成本：个股日内交易成本远高于 ETF
-      印花税 0.05%（卖出，2023年8月后减半）
-      佣金 0.02-0.03% × 2
-      滑点 0.1-0.3%（高换手小票滑点更大）
-      合计单边约 0.1-0.2%
-      → 30.58bp = 0.3058%，扣 0.2% 只剩 0.1%
+stock_data 的「成交额」字段：
+  · 2024-10-11 ~ 2026-03-31 完全为空（18个月）
+  · 兜底方案 close x volume 在多个时期严重偏离真实值：
+      2025-05 满足"5000万"门槛的占 23.6%
+      2025-07 满足的占 67.4%
+      2025-09 满足的占 72.4%
+      2025-12 又掉回 0.6%
+      2026-02 只有 0.7%
+  → 同一门槛下通过率从 0% 跳到 72% 再掉回 0.6%，
+    说明 close x volume 不能代表真实成交额，流动性筛选完全失真。
 
-  T2. 高换手小票能不能买到？
-      涨停买不进、流动性不足
+因此：
+  · 本文的 22.73bp / 41.58bp 等日内收益数字不可作为依据
+  · 盈亏平衡成本（0.114% / 0.208%）同样不可靠
+  · 需要先修好成交额数据（用 tushare daily 的 amount 字段重建）
+    才能重做这个分析
 
-  T3. 稳定性：这个优势在样本外还成立吗？
+已修正的口径问题（保留作为记录）：
+  · 前视信息：流动性筛选改用【前一日】成交额（amount_lag）
+  · 涨停判断：从 abs(gap)>=9.5% 改为 gap>=+9.5%（排除向下跳空）
+  · 单位：明确 close x volume 得到的是【元】（成交量单位=股）
+
+原始设计：
+  换手率最高20%的股票隔夜更负、日内更正。诱人想法是只做日内。
+  但个股日内成本（印花税+佣金+滑点）远高于 ETF，需验证成本可行性。
+  同时需验证：高换手小票能否买到、优势是否稳定。
 
 用法：
   python scripts/test_high_turnover_intraday.py
@@ -72,11 +82,17 @@ def load_data(db: str) -> pd.DataFrame:
     df = df.sort_values(["stock_code", "date"]).reset_index(drop=True)
 
     # 成交额兜底
+    g = df.groupby("stock_code")
+    # 成交额：stock_data 的「成交额」字段有 18 个月空洞，用 close×volume 兜底
+    # ⚠️ 单位：stock_data 的「成交量」单位是【股】（已验证 ratio=1.0），
+    #    所以 close×volume 得到的是【元】。
     miss = int(df["amount"].isna().sum())
     if miss:
         df["amount"] = df["amount"].fillna(df["close"] * df["volume"])
-
+    # ⚠️ 前视信息修正（知微审查第4条）：流动性筛选必须用【昨日】成交额
     g = df.groupby("stock_code")
+    df["amount_lag"] = g["amount"].shift(1)
+
     df["prev_close"] = g["close"].shift(1)
     df["gap"] = df["open"] / df["prev_close"] - 1.0
     df["intraday"] = df["close"] / df["open"] - 1.0
@@ -118,8 +134,10 @@ def main() -> None:
             qlo = sub["turnover_ma20_lag"].quantile(lo)
             qhi = sub["turnover_ma20_lag"].quantile(hi)
             sel = sub[(sub["turnover_ma20_lag"] >= qlo) & (sub["turnover_ma20_lag"] <= qhi)]
-            # 流动性过滤：成交额 >= 5000万
-            sel = sel[sel["amount"] >= 5000]
+            # ✅ 流动性过滤：用【前一日】成交额，避免前视信息（知微审查第4条）
+            #    当天完整成交额要收盘后才知道，不能用来做开盘时的选股。
+            #    单位：amount_lag 已经是 元（收盘价×成交量，成交量单位=股）
+            sel = sel[sel["amount_lag"] >= 5e7]   # 5000万元
             if len(sel) < 10:
                 continue
             rows.append({"date": d, "intra": sel["intraday"].mean(),
@@ -174,16 +192,25 @@ def main() -> None:
             if len(sub) < 100:
                 continue
             qlo = sub["turnover_ma20_lag"].quantile(0.80)
-            sel = sub[(sub["turnover_ma20_lag"] >= qlo) & (sub["amount"] >= 5000)]
+            sel = sub[(sub["turnover_ma20_lag"] >= qlo) & (sub["amount_lag"] >= 5e7)]
             if len(sel) < 10:
                 continue
             total_days += 1
-            # 次日该组中有多少只开盘就涨停（gap >= 9.5% 近似）
-            if (sel["gap"].abs() >= 0.095).mean() > 0.02:
+            # ✅ 修正（知微审查第4条）：
+            #    旧实现用 abs(gap)>=9.5%，把【向下跳空】也算成"买不进"，这是错的。
+            #    买不进只对应【向上】跳空到涨停。
+            #    这里改为：向上跳空 >= +9.5%（近似涨停开盘，未区分板块/日期/真实涨停价）。
+            #    ⚠️ 仍是粗糙代理：
+            #      · 创业板/科创板 涨停是 20%，主板 ST 是 5%
+            #      · 未考虑卖单排队的实际成交可能
+            if (sel["gap"] >= 0.095).mean() > 0.02:
                 limit_up_days += 1
         if total_days:
-            print(f"  在 {total_days} 个交易日中，有 {limit_up_days} 天该组超过2%的股票隔夜跳空≥9.5%")
-            print(f"  占比 {limit_up_days/total_days*100:.1f}%（这些股票开盘就买不进）")
+            print(f"  在 {total_days} 个交易日中，有 {limit_up_days} 天该组超过2%的股票")
+            print(f"  开盘向上跳空 >= +9.5%（近似涨停开盘，买不进）")
+            print(f"  占比 {limit_up_days/total_days*100:.1f}%")
+            print(f"  ⚠️ 这是粗糙代理：未区分板块涨停幅度（创业板/科创板20%、ST股5%），")
+            print(f"     也未考虑卖单排队的实际成交可能。真实买不进比例需分钟级数据确认。")
 
     # ===== T3: 稳定性（前后半段）=====
     print("\n" + "=" * 96)
