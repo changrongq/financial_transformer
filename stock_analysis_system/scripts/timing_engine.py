@@ -129,11 +129,27 @@ def run_strict_t1(df: pd.DataFrame, cost: float = 0.0005, slip: float = 0.0,
       这在买入当天体现为「日内收益按偏离后的买入价折算」，
       与「直接减 slip」有 ~s² 的二阶差异（s=0.1% 时约 0.001%），可忽略。
 
-    ⚠️ BUGFIX 记录（2026-10-29，钳星审查后修正）：
-       旧实现卖出时写 `prev_eq *= (sell / entry_price)`，
-       但持有期间已经每天累乘了 ret —— 这导致每段持仓的涨幅被【计算两次】。
-       实测后果：沪深300 在 slip=0 时被高估为 +300.2%，修正后为 +115.7%（差 184pp）。
-       修复方式：卖出时只扣卖出成本，不再重复计算价格涨幅。
+    ⚠️ 记账规则（知微审查后重写，2026-10-31）：
+
+       每日按【基金份额 × 价格】记账，把一天拆成两段：
+
+         段 1（隔夜）  ：昨收 → 今开
+            由【昨日收盘时的仓位】决定是否参与
+         段 2（日内）  ：今开 → 今收
+            由【今日开盘后的仓位】决定是否参与
+
+       所以：
+         买入日：昨日空仓 → 不吃隔夜；今日持仓 → 吃日内
+         持有日：昨日持仓 → 吃隔夜；今日持仓 → 吃日内（= 吃全天）
+         卖出日：昨日持仓 → 【吃隔夜】；今日空仓 → 不吃日内
+         空仓日：两段都不吃
+
+       旧实现（已修）在卖出日直接 `prev_eq *= (1 - slip - cost)`，
+       把【卖出日的隔夜段】也一起丢掉了 —— 这是记账错误。
+
+       BUGFIX 历史：
+         2026-10-29 修正「整段持仓收益重复计算」
+         2026-10-31 修正「卖出日漏记隔夜」（知微审查发现）
     """
     d = add_signal(df, window, threshold)
     n = len(d)
@@ -147,18 +163,23 @@ def run_strict_t1(df: pd.DataFrame, cost: float = 0.0005, slip: float = 0.0,
         target = 1.0 if bool(d.loc[i - 1, "sig"]) else 0.0
         prev_eq = eq[-1]
 
-        if target > pos:      # 空仓 → 买入（T 日开盘）
-            # 买入当天只吃日内（开盘→收盘），并扣买入成本+滑点
-            intra = float(d.loc[i, "intraday"])   # close/open - 1
-            prev_eq *= (1.0 + intra - slip - cost)
-            trades += 1
-        elif target < pos:    # 持仓 → 卖出（T 日开盘）
-            # 卖出当天不参与收益，只扣卖出成本+滑点
-            # ⚠️ 不再乘 (sell/entry_price)，避免与持有期日内收益重复计算
+        # 昨日收盘时的仓位就是 pos（循环里上一轮已经更新）
+        prev_pos = pos
+
+        # 段 1：隔夜（昨收 → 今开），由【昨日仓位】参与
+        o_t = float(d.loc[i, "open"])
+        c_prev = float(d.loc[i - 1, "close"])
+        overnight = (o_t / c_prev - 1.0) if c_prev > 0 else 0.0
+        prev_eq *= (1.0 + prev_pos * overnight)
+
+        # 段 2：日内（今开 → 今收），由【今日仓位】参与
+        intra = float(d.loc[i, "intraday"])
+        prev_eq *= (1.0 + target * intra)
+
+        # 成本：仓位变动时收（买卖各一次）
+        if target != prev_pos:
             prev_eq *= (1.0 - slip - cost)
             trades += 1
-        elif target > 0:      # 继续持有：吃全天（用 pre_close 算，跨拆分连续）
-            prev_eq *= (1.0 + float(d.loc[i, "ret"]))
 
         eq.append(prev_eq)
         pos = target
@@ -207,10 +228,11 @@ def buy_hold_curve(df: pd.DataFrame, start_idx: int = 0,
     if start_idx >= len(d):
         return np.array([1.0])
 
-    # 首日：开盘买入，吃日内，扣成本
+    # 首日：开盘买入，只吃日内（不吃隔夜），扣成本
     eq = [1.0 + float(d.loc[start_idx, "intraday"]) - slip - cost]
 
-    # 之后：吃每天的复权日收益
+    # 之后：一直持有 → 每天吃隔夜 + 日内 = 全天
+    # 用 ret = close/pre_close - 1 计算，跨拆分连续
     for i in range(start_idx + 1, len(d)):
         eq.append(eq[-1] * (1.0 + float(d.loc[i, "ret"])))
     return np.array(eq)
@@ -235,16 +257,43 @@ def align_offset(df: pd.DataFrame, curve_len: int) -> int:
 
 
 def stats(curve: np.ndarray) -> dict:
+    """计算绩效指标。
+
+    ⚠️ BUGFIX 记录（2026-10-31，知微审查后修正）：
+      1) 夏普：旧实现用 np.diff(净值) 得到的是【净值绝对变化】，不是收益率。
+         正确应先算 r[t] = curve[t]/curve[t-1] - 1，再求 mean/std。
+         影响：所有历史夏普数字作废，需重算。
+      2) 回撤：旧实现的累计最高值没有包含【初始资本 1】，会低估回撤。
+         例：曲线 [0.9, 0.81] 旧算法得 -10%，实际从初始资本计是 -19%。
+
+    约定（显式声明）：
+      · 无风险收益率 = 0
+      · 标准差自由度 ddof = 0（与 numpy 默认一致）
+      · 年化交易日 = TRADING_DAYS_PER_YEAR（244）
+      · 首期收益 = curve[0] / 1.0 - 1（以初始资本 1 为起点）
+    """
     if len(curve) < 2:
         return {"total": 0.0, "ann": np.nan, "dd": 0.0, "sharpe": np.nan, "calmar": np.nan}
-    r = np.diff(np.concatenate([[1.0], curve]))
-    total = float(curve[-1] - 1)
-    years = len(curve) / 244
+
+    # 把初始资本 1 前置，形成完整净值序列
+    full = np.concatenate([[1.0], curve])
+
+    # 收益率序列（正确做法）
+    rets = full[1:] / full[:-1] - 1.0
+
+    total = float(full[-1] / full[0] - 1)
+    years = len(curve) / TRADING_DAYS_PER_YEAR
     ann = float((1 + total) ** (1 / years) - 1) if years > 0 else np.nan
-    dd = float((curve / np.maximum.accumulate(curve) - 1).min())
-    sharpe = float(r.mean() / r.std() * np.sqrt(244)) if r.std() > 0 else np.nan
+
+    # 回撤：累计最高值包含初始资本 1
+    dd = float((full / np.maximum.accumulate(full) - 1).min())
+
+    sharpe = (float(rets.mean() / rets.std() * np.sqrt(TRADING_DAYS_PER_YEAR))
+              if rets.std() > 0 else np.nan)
     calmar = float(ann / abs(dd)) if dd < 0 else np.nan
-    return {"total": total, "ann": ann, "dd": dd, "sharpe": sharpe, "calmar": calmar}
+
+    return {"total": total, "ann": ann, "dd": dd, "sharpe": sharpe, "calmar": calmar,
+            "n_periods": len(rets), "vol_ann": float(rets.std() * np.sqrt(TRADING_DAYS_PER_YEAR))}
 
 
 if __name__ == "__main__":
