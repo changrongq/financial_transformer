@@ -40,3 +40,4 @@ wheels/
 config.yaml
 config.yaml.backup_*
 .env
+logs_preclose.txt
