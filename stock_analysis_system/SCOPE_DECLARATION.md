@@ -1,7 +1,27 @@
 # 口径声明（审计回应）
-> 2026-10-29
+> 2026-10-29，更新于 2026-10-31
 > 回应钳星独立审查报告的 5 项发现。
 > 每一项都核对了代码，确认成立，并做了修正或显式声明。
+
+---
+
+## ⚠️ RL 结论范围（2026-10-31 知微复核后新增）
+
+知微审阅了 RL 训练代码，发现**动作-回报广播 bug**，
+导致策略梯度恒为零（实测 `0.000000`，修复后 `1.011380`）。
+
+因此本文件中涉及 RL 的结论按下表收窄：
+
+| 结论 | 状态 |
+|---|---|
+| "RL 五次实验全失败" | **撤回**。同一个有 bug 的训练器，不构成五次独立否证 |
+| "日频单资产不适合 RL" | **撤回**。未得到验证 |
+| "高熵证明市场无规律" | **降级**。观测保留，因果撤回 |
+| RL 骨架信号 ≠ 实盘信号（问题 1） | **仍然成立**（与训练 bug 无关）|
+
+修复与验证见 `ZHIWEI_RL_REVIEW_BUGFIX.md`：
+- `scripts/verify_rl_fixes.py` **17/17 PASS**
+- `scripts/rl_trainer_selftest.py` 已知答案任务准确率 **0.967**（legacy 0.671）
 
 ---
 
@@ -37,11 +57,15 @@
 
 ### 会影响结论吗
 
-**不会推翻，但边界要说清：**
+⚠️ **2026-10-31 修订**：下面第 1 条已作废。
 
-1. RL 失败的原因是"动作空间小到 3 个、样本 463 次仍然散乱"——这是**问题本身性质**，与信号来源无关
-2. 但严格说，我们**没有在"全市场等权信号"上验证过 RL**
+~~1. RL 失败的原因是"动作空间小到 3 个、样本 463 次仍然散乱"——这是问题本身性质~~
+→ **撤回**。真实原因是训练器有 bug，梯度为零。
+
+保留的部分：
+2. 严格说，我们**没有在"全市场等权信号"上验证过 RL**
 3. 如果未来要重新试 RL，应该用实盘的信号口径
+4. **这个口径差异依然存在**，即使训练 bug 修好了也不能混用
 
 ### 已做的修正
 
@@ -97,7 +121,7 @@ pos = 1.0  # 起始假设满仓
 | **6标的严格T+1收益/回撤/夏普** | `validate_timing_multi_v2.py` | `timing_multi_v2_strict.json` |
 | 参数网格 105/120 | `validate_timing_multi_v2.py` | `timing_multi_v2_strict.json` |
 | 滑点敏感性 | `validate_timing_multi_v2.py` | `timing_multi_v2_strict.json` |
-| 逐年胜率 48% / 70% | `validate_timing_multi_v2.py` | `timing_multi_v2_strict.json` |
+| 逐年胜率 38.1%（8/21） | `validate_timing_multi_v2.py` | `timing_multi_v2_strict.json` |
 | 理想化虚高 154.7pp | `validate_timing_multi_v2.py` | `timing_multi_v2_strict.json` |
 | **隔夜/日内 11/11 标的** | `analyze_overnight_intraday.py` | `overnight_intraday_analysis.json` |
 | 逐年隔夜为负 19/21 | `analyze_overnight_intraday.py` | `overnight_intraday_analysis.json` |
@@ -109,8 +133,9 @@ pos = 1.0  # 起始假设满仓
 | 高换手日内临界 0.114% | `test_high_turnover_intraday.py` | `high_turnover_intraday.json` |
 | **ETF拆分事件** | `audit_etf_splits.py` | `etf_split_audit.json` |
 | **成本临界 0.032%** | `test_intraday_only_strategy.py` | `intraday_only_strategy.json` |
-| **RL 熵 1.098 / 种子散乱** | `verify_grokking_vs_noise.py` | `grokking_vs_noise.json` |
-| RL v1-v5 各结果 | `rl_timing_v2/v3/v4/overlay.py` | 各自 json |
+| ~~RL 熵 1.098 / 种子散乱~~ **观测保留、因果撤回** | `verify_grokking_vs_noise.py` | `grokking_vs_noise.json` |
+| ~~RL v1-v5 各结果~~ **实现有缺陷，不能作为否证** | `rl_timing_v2/v3/v4/overlay.py` | 各自 json |
+| **RL 训练器自检 PASS** | `rl_trainer_selftest.py` | `rl_trainer_selftest.json` |
 | 动量全市场 -70.1% | `validate_full_market_momentum.py` | `full_market_momentum_validation.json` |
 | 行业动量 | `validate_sector_momentum.py` | `sector_momentum_validation.json` |
 | 市值分层 | `validate_momentum_by_mktcap.py` | `momentum_by_mktcap.json` |

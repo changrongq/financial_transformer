@@ -49,6 +49,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 
+# ★ 知微审查 2026-10-31：统一使用修正后的策略梯度与账本
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rl_algo_utils import paired_policy_loss, discounted_returns, assert_paired
+from rl_ledger import ledger_stats
+
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "results"
 
@@ -83,27 +89,29 @@ def load_etf(db: str, code: str, window: int = 10) -> pd.DataFrame:
        而实盘脚本 daily_regime_timing_signal.py 用【全市场等权】N 日均收益。
        这是两套不同信号！
 
-       为什么不一样：
-         · 实盘：全市场等权，覆盖 5000+ 只股票，信号更平滑、代表性强
-         · 本 RL 实验：只用单一 ETF 价格，因为要模拟"自己能否学到执行细节"，
-           用同一资产避免口径混杂
-
-       这意味着：本脚本的 RL 结论不能直接推广到实盘信号上。
-       如果要验证 RL 在实盘信号上的效果，需改用 stock_data 计算信号。
+    ⚠️ 复权（知微审查 2026-10-31）：
+       必须用 pre_close 算收益。ETF 有份额拆分（如 510500 在 2015-04-15），
+       直接用 close.pct_change() 会产生 +261% 的假收益。
     """
     conn = sqlite3.connect(db)
     df = pd.read_sql_query(
-        "SELECT trade_date, open, high, low, close FROM etf_daily WHERE ts_code=? ORDER BY trade_date",
+        "SELECT trade_date, open, high, low, close, pre_close "
+        "FROM etf_daily WHERE ts_code=? ORDER BY trade_date",
         conn, params=(code,))
     conn.close()
     df["date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d", errors="coerce")
-    for c in ["open", "high", "low", "close"]:
+    for c in ["open", "high", "low", "close", "pre_close"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["date", "open", "close"])
     df = df[(df["open"] > 0) & (df["close"] > 0)].sort_values("date").reset_index(drop=True)
 
-    df["ret"] = df["close"].pct_change(fill_method=None)
-    df["gap"] = df["open"] / df["close"].shift(1) - 1.0
+    # pre_close 缺失时用前收兜底
+    df["pre_close"] = df["pre_close"].replace(0, np.nan)
+    df["pre_close"] = df["pre_close"].fillna(df["close"].shift(1))
+
+    # ★ 复权口径：用 pre_close
+    df["ret"] = df["close"] / df["pre_close"] - 1.0
+    df["gap"] = df["open"] / df["pre_close"] - 1.0
     df["intraday"] = df["close"] / df["open"] - 1.0
 
     # 择时信号（T日收盘算）
@@ -111,8 +119,8 @@ def load_etf(db: str, code: str, window: int = 10) -> pd.DataFrame:
     df["signal_hold"] = df["regime"] >= 0
 
     # CASH 时刻的特征（全部 T 日可得）
-    df["ret5"] = df["close"].pct_change(5)
-    df["ret20"] = df["close"].pct_change(20)
+    df["ret5"] = df["close"] / df["pre_close"].shift(4) - 1.0
+    df["ret20"] = df["close"] / df["pre_close"].shift(19) - 1.0
     df["vol10"] = df["ret"].rolling(10).std()
     df["vol60"] = df["ret"].rolling(60).std()
     df["vol_ratio"] = df["vol10"] / df["vol60"].replace(0, np.nan)
@@ -166,7 +174,11 @@ def rollout(df: pd.DataFrame, local_idx, cost: float, mu, sd, policy=None,
                 # 固定仓位覆盖（用于基线：总是半仓）
                 target = p_override
             elif policy is not None:
-                x = torch.from_numpy(norm[i]).unsqueeze(0)
+                # ★ 知微审查 2026-10-31 修正未来函数：
+                #   旧写法用 norm[i]（第 i 日收盘特征）决定 target，然后吃 ret[i]（第 i 日收益）。
+                #   特征里含第 i 日收盘信息 -> 泄漏。
+                #   正确做法：用 norm[i-1]（第 i-1 日收盘可观测）决定第 i 日开盘执行的 target。
+                x = torch.from_numpy(norm[i - 1]).unsqueeze(0)
                 with torch.no_grad():
                     p = policy(x).squeeze().numpy()
                 if greedy:
@@ -179,9 +191,12 @@ def rollout(df: pd.DataFrame, local_idx, cost: float, mu, sd, policy=None,
             else:
                 target = 0.0  # 基准：全卖
 
-        if target != pos:
+        prev = pos
+        if target != prev:
             eq *= (1 - 2 * cost)
-        eq *= (1 + target * ret[i])
+        # ★ 知微审查修正记账：整段 ret[i] 不能直接乘新仓位。
+        #   拆成 隔夜(旧仓位) + 日内(新仓位)，与 rl_ledger 同一口径。
+        eq *= (1 + prev * gap[i]) * (1 + target * intraday[i])
         pos = target
         curve.append(eq)
 
@@ -189,16 +204,20 @@ def rollout(df: pd.DataFrame, local_idx, cost: float, mu, sd, policy=None,
 
 
 def stats(curve: np.ndarray, n_days: int) -> dict:
-    if len(curve) < 2:
-        return {"total": 0.0, "ann": np.nan, "dd": 0.0, "sharpe": np.nan}
-    r = np.diff(np.concatenate([[1.0], curve]))
-    total = float(curve[-1] - 1)
-    years = max(n_days / 244, 1e-6)
-    dd = float((curve / np.maximum.accumulate(curve) - 1).min())
-    sharpe = float(r.mean() / r.std() * np.sqrt(244)) if r.std() > 0 else np.nan
+    """绩效统计。
+
+    ★ 知微审查 2026-10-31 修正：
+       旧实现 `r = np.diff(np.concatenate([[1.0], curve]))` 得到的是【净值变化】，
+       不是收益率，据此算出的夏普无意义。且回撤未包含初始资本 1.0。
+       这里统一改用 rl_ledger.ledger_stats 的同一套口径。
+    """
+    s = ledger_stats(curve)
+    total = s["total"]
     return {"total": total,
-            "ann": float((1 + total) ** (1 / years) - 1),
-            "dd": dd, "sharpe": sharpe}
+            "ann": s["ann"],
+            "dd": s["dd"],
+            "sharpe": s["sharpe"],
+            "n_days": n_days}
 
 
 class Policy(nn.Module):
@@ -285,46 +304,49 @@ def main() -> None:
         norm = np.clip((sub_tr[FEAT_COLS].values.astype(np.float32) - mu) / sd, -5, 5).astype(np.float32)
         sig = sub_tr["signal_hold"].values
         ret = sub_tr["ret"].values.astype(np.float64)
+        gap_a = sub_tr["gap"].values.astype(np.float64)
+        intra_a = sub_tr["intraday"].values.astype(np.float64)
 
         for ep in range(args.episodes):
             # 从随机时点开始一条 episode
             start = np.random.randint(5, max(6, n_train - 300))
-            eq = 1.0
+            end = min(start + 300, n_train)
             pos = 1.0
-            lps, rewards = [], []
-            for i in range(start + 1, min(start + 300, n_train)):
+            lps, rewards, dec_idx = [], [], []
+
+            for i in range(start + 1, end):
+                # ★ 知微审查 2026-10-31 修正：
+                #   (1) 特征用 norm[i-1]（第 i-1 日收盘可观测），不再用 norm[i] 泄漏当天收益
+                #   (2) 只在【需要 RL 决策】的日子记录 log_prob 与对应 reward，
+                #       保证动作数 K 与回报数 K 严格一致（旧版 K != T 靠广播掩盖）
+                #   (3) 记账拆成 隔夜(旧仓位) + 日内(新仓位)
                 if sig[i - 1]:
                     target = 1.0
                 else:
-                    x = torch.from_numpy(norm[i]).unsqueeze(0)
+                    x = torch.from_numpy(norm[i - 1]).unsqueeze(0)
                     p = pol(x)
                     d = Categorical(p)
                     a = d.sample()
-                    lps.append(d.log_prob(a))
+                    lps.append(d.log_prob(a).squeeze(-1))   # ★ 压成标量
                     target = CASH_POSITIONS[int(a.item())]
+                    dec_idx.append(len(lps) - 1)
 
-                # 奖励 = 该日组合收益 - "全卖"基准的收益（专门优化边际改进）
-                r_port = target * ret[i]
-                r_base = 0.0 if not sig[i - 1] else ret[i]  # CASH时全卖收益=0
-                cost_pen = 0.0
-                if target != pos:
-                    cost_pen = 2 * args.cost
-                reward = r_port - r_base - cost_pen
-                rewards.append(reward)
+                prev = pos
+                cost_pen = (2 * args.cost) if target != prev else 0.0
+                day_ret = (1 + prev * gap_a[i]) * (1 + target * intra_a[i]) - 1.0
+                r_port = day_ret - cost_pen
 
-                eq *= (1 + r_port - cost_pen)
+                # 只把本日组合净收益记到本日决策上（若本日是 RL 决策日）
+                if not sig[i - 1]:
+                    rewards.append(r_port)
                 pos = target
 
-            if not lps:
+            if len(lps) < 2 or len(lps) != len(rewards):
                 continue
-            G, disc = 0.0, []
-            for r in reversed(rewards):
-                G = r + 0.99 * G
-                disc.append(G)
-            disc = torch.tensor(list(reversed(disc)), dtype=torch.float32)
-            if disc.std() > 1e-8:
-                disc = (disc - disc.mean()) / disc.std()
-            loss = -(torch.stack(lps) * disc).mean()
+
+            # ★ 严格配对：assert 由 paired_policy_loss 内部完成
+            disc = discounted_returns(rewards, gamma=0.99)
+            loss = paired_policy_loss(lps, disc, normalize=True)
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(pol.parameters(), 1.0)

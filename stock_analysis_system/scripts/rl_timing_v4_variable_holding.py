@@ -52,6 +52,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 
+# ★ 知微审查 2026-10-31：统一策略梯度与账本实现
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rl_algo_utils import paired_policy_loss, discounted_returns, assert_paired
+from rl_ledger import ledger_stats
+
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "results"
 
@@ -59,7 +65,7 @@ RESULTS_DIR = ROOT / "results"
 HOLD_OPTIONS = [0, 1, 2, 3, 5, 10]
 N_ACTIONS = len(HOLD_OPTIONS)
 N_FEATS = 9
-OBS_DIM = N_FEATS + N_ACTIONS  # 特征 + 上一个动作 one-hot
+OBS_DIM = N_FEATS + N_ACTIONS + 1  # 特征 + 上一个动作 one-hot + 当前回撤
 
 
 def _resolve_db() -> str:
@@ -126,9 +132,25 @@ def period_return(open_, close, t: int, n: int) -> float:
 
 
 class Env:
-    """可变持有期环境。只在持仓到期后决策。"""
+    """可变持有期环境。只在持仓到期后决策。
 
-    def __init__(self, feats, open_, close, cost, dd_lam, dd_free, horizon, mu, sd):
+    ★ 知微审查 2026-10-31 修正三处：
+
+      1. 【时间隔离】新增 `n_allowed` 参数。训练环境只允许在
+         `[0, n_allowed)` 区间内起步与推进，不能越界到测试期。
+         旧实现 `reset()` 在 `n - horizon - 15` 内随机取起点，
+         把全量数组传给 Env → 实测 1000 次 reset 有 225 次直接落在测试区间。
+
+      2. 【持仓期回撤】旧实现只在持有期结束时更新 `eq` / `peak`，
+         如果中间跌 50% 再回来，回撤惩罚完全不触发（合成例已验证）。
+         新增 `dd_path` 模式：按日更新净值路径算真实最大回撤。
+
+      3. 【账户状态】观测里补上当前回撤，否则无记忆网络无法区分
+         "同样市场输入、不同账户历史" 的情形。
+    """
+
+    def __init__(self, feats, open_, close, cost, dd_lam, dd_free, horizon, mu, sd,
+                 n_allowed: int | None = None, daily_dd: bool = True):
         self.feats = feats
         self.open = open_
         self.close = close
@@ -139,10 +161,17 @@ class Env:
         self.mu = mu
         self.sd = sd
         self.n = len(open_)
+        # ★ 时间隔离：默认全量（兼容旧调用），训练时必须显式传 n_train
+        self.n_allowed = min(self.n if n_allowed is None else int(n_allowed), self.n)
+        self.daily_dd = daily_dd
 
     def reset(self, start=None):
-        hi = max(1, self.n - self.horizon - 15)
-        self.t = start if start is not None else np.random.randint(0, hi)
+        # ★ 起点上限改为 n_allowed，不再用全量长度
+        hi = max(1, self.n_allowed - self.horizon - 15)
+        if start is not None:
+            self.t = int(np.clip(start, 0, max(0, self.n_allowed - 2)))
+        else:
+            self.t = np.random.randint(0, hi)
         self.start_t = self.t
         self.eq = 1.0
         self.peak = 1.0
@@ -153,10 +182,22 @@ class Env:
         x = (self.feats[self.t] - self.mu) / self.sd
         oh = np.zeros(N_ACTIONS, dtype=np.float32)
         oh[self.prev_a] = 1.0
-        return np.clip(np.concatenate([x, oh]), -5, 5).astype(np.float32)
+        # ★ 账户状态：当前回撤（归一化到 [-1,0]）
+        cur_dd = float(np.clip(self.eq / self.peak - 1.0, -1.0, 0.0))
+        acct = np.array([cur_dd], dtype=np.float32)
+        return np.clip(np.concatenate([x, oh, acct]), -5, 5).astype(np.float32)
+
+    def _path_maxdd(self, buy_idx: int, sell_idx: int) -> float:
+        """持有期内按日计算真实最大回撤（相对买入价）。"""
+        seg = self.close[buy_idx:sell_idx + 1]
+        if len(seg) == 0:
+            return 0.0
+        peak = np.maximum.accumulate(seg)
+        return float((seg / peak - 1.0).min())
 
     def step(self, a: int):
         n_hold = HOLD_OPTIONS[a]
+        path_dd = 0.0
         if n_hold == 0:
             r = 0.0
             trade_cost = 0.0
@@ -167,19 +208,27 @@ class Env:
                 r = 0.0
                 advance = 1
             else:
+                buy_idx = self.t + 1
+                sell_idx = self.t + 1 + n_hold
                 trade_cost = 2 * self.cost  # 买入 + 卖出
                 advance = n_hold + 1  # 持有 n 天后，t+1+n 卖出，下一步从那里决策
+                if self.daily_dd:
+                    # ★ 真实持仓期回撤
+                    path_dd = self._path_maxdd(buy_idx, min(sell_idx, self.n - 1))
             r = r - trade_cost
 
         self.eq *= (1 + r)
         self.peak = max(self.peak, self.eq)
         dd = self.eq / self.peak - 1.0
-        penalty = self.dd_lam * max(0.0, -dd - self.dd_free) ** 2
+        # ★ 同时考虑持仓路径内的回撤
+        eff_dd = min(dd, path_dd if n_hold > 0 else 0.0)
+        penalty = self.dd_lam * max(0.0, -eff_dd - self.dd_free) ** 2
         reward = r - penalty
 
         self.prev_a = a
-        self.t = min(self.t + advance, self.n - 2)
-        done = (self.t - self.start_t) >= self.horizon or self.t >= self.n - 2
+        # ★ 不允许越过 n_allowed
+        self.t = min(self.t + advance, self.n_allowed - 2)
+        done = (self.t - self.start_t) >= self.horizon or self.t >= self.n_allowed - 2
         return (self._obs() if not done else np.zeros(OBS_DIM, dtype=np.float32)), reward, done
 
 
@@ -236,15 +285,14 @@ def evaluate(policy, feats, open_, close, cost, start, end, mu, sd, warm=None):
                 "days": 0, "n_decisions": 0, "action_dist": {}, "avg_holding": 0.0}
     arr = np.array(curve)
     days = t - start
-    years = max(days / 244, 1e-6)
-    total = float(arr[-1] - 1)
-    rets = np.diff(np.concatenate([[1.0], arr]))
     dist = {f"{HOLD_OPTIONS[k]}日": float(np.mean(np.array(acts) == k)) for k in range(N_ACTIONS)}
+    # ★ 知微审查 2026-10-31：统一用 rl_ledger 口径（夏普用收益率、回撤含初始资本）
+    s = ledger_stats(arr)
     return {
-        "total": total,
-        "ann": float((1 + total) ** (1 / years) - 1) if years > 0 else np.nan,
-        "dd": float((arr / np.maximum.accumulate(arr) - 1).min()),
-        "sharpe": float(rets.mean() / rets.std() * np.sqrt(244)) if rets.std() > 0 else np.nan,
+        "total": s["total"],
+        "ann": s["ann"],
+        "dd": s["dd"],
+        "sharpe": s["sharpe"],
         "days": int(days),
         "n_decisions": len(acts),
         "action_dist": dist,
@@ -300,8 +348,11 @@ def main() -> None:
     for seed in args.seeds:
         np.random.seed(seed)
         torch.manual_seed(seed)
-        env = Env(feats, open_, close, args.cost, args.dd_lambda,
-                  args.dd_free, args.horizon, mu, sd)
+        # ★ 知微审查 2026-10-31：训练环境只看训练区间，杜绝测试期泄漏
+        env = Env(feats[:n_train], open_[:n_train], close[:n_train],
+                  args.cost, args.dd_lambda,
+                  args.dd_free, args.horizon, mu, sd,
+                  n_allowed=n_train)
         pol = Policy()
         opt = optim.Adam(pol.parameters(), lr=args.lr)
 
@@ -314,16 +365,16 @@ def main() -> None:
                 p = pol(x)
                 d = Categorical(p)
                 a = d.sample()
-                lps.append(d.log_prob(a))
+                # ★ 关键修正：log_prob 必须压成标量，否则 [T,1]×[T] 广播成 [T,T]
+                lps.append(d.log_prob(a).squeeze(-1))
                 obs, r, done = env.step(int(a.item()))
                 rs.append(r)
-            G, disc = 0.0, []
-            for r in reversed(rs):
-                G = r + 0.99 * G
-                disc.append(G)
-            disc = torch.tensor(list(reversed(disc)), dtype=torch.float32)
-            disc = (disc - disc.mean()) / (disc.std() + 1e-8)
-            loss = -(torch.stack(lps) * disc).mean()
+
+            if len(lps) < 2:
+                continue
+            disc = discounted_returns(rs, gamma=0.99)
+            # ★ paired_policy_loss 内部会断言形状一致，广播 bug 无法复现
+            loss = paired_policy_loss(lps, disc, normalize=True)
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(pol.parameters(), 1.0)

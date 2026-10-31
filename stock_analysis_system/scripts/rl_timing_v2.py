@@ -50,11 +50,18 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+# ★ 知微审查 2026-10-31：统一策略梯度与账本
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rl_algo_utils import paired_policy_loss, discounted_returns
+from rl_ledger import ledger_stats
+
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "results"
 
 ACTIONS = [0.0, 0.25, 0.5, 0.75, 1.0]
-OBS_DIM = 8
+# ★ 知微审查修正：特征列已删掉当日 ret（未来函数），维度从 8 改为 7
+OBS_DIM = 7
 
 
 def _resolve_db() -> str:
@@ -112,7 +119,8 @@ class Env:
     """episodic 环境：每次 reset 随机起点，固定长度。"""
 
     def __init__(self, feats: np.ndarray, rets: np.ndarray, cost: float,
-                 dd_lambda: float, dd_free: float, horizon: int, obs_mu, obs_sd):
+                 dd_lambda: float, dd_free: float, horizon: int, obs_mu, obs_sd,
+                 n_allowed: int | None = None):
         self.feats = feats
         self.rets = rets
         self.cost = cost
@@ -121,10 +129,15 @@ class Env:
         self.horizon = horizon
         self.obs_mu = obs_mu
         self.obs_sd = obs_sd
+        # ★ 知微审查 2026-10-31：限定可选起点范围，防止训练环境跑到测试期
+        self.n_allowed = len(rets) if n_allowed is None else min(int(n_allowed), len(rets))
 
     def reset(self, start: int | None = None):
-        max_start = len(self.rets) - self.horizon - 2
-        self.t = start if start is not None else np.random.randint(0, max(1, max_start))
+        max_start = self.n_allowed - self.horizon - 2
+        if start is not None:
+            self.t = int(np.clip(start, 0, max(0, self.n_allowed - 2)))
+        else:
+            self.t = np.random.randint(0, max(1, max_start))
         self.pos = 0.0
         self.eq = 1.0
         self.peak = 1.0
@@ -151,7 +164,7 @@ class Env:
         reward = net - penalty
 
         self.pos = target
-        self.t = (self.t + 1) % len(self.rets)
+        self.t = min(self.t + 1, self.n_allowed - 1)
         self.steps += 1
         done = self.steps >= self.horizon
         return (self._obs() if not done else np.zeros(OBS_DIM, dtype=np.float32)), reward, done
@@ -192,15 +205,12 @@ def evaluate(policy, feats, rets, cost, start_idx, duration) -> dict:
             actions.append(target)
             pos = target
     eq_arr = np.array(eq_curve)
-    rets_arr = np.diff(np.concatenate([[1.0], eq_arr]))
-    dd = float((eq_arr / np.maximum.accumulate(eq_arr) - 1).min())
-    total = float(eq_arr[-1] - 1)
-    years = duration / 244
-    ann = (1 + total) ** (1 / years) - 1 if years > 0 else np.nan
-    sharpe = float(rets_arr.mean() / rets_arr.std() * np.sqrt(244)) if rets_arr.std() > 0 else np.nan
+    # ★ 知微审查 2026-10-31：夏普用收益率、回撤含初始资本 1.0
+    s = ledger_stats(eq_arr)
     return {
-        "total_return": total, "annual_return": ann, "max_drawdown": dd,
-        "sharpe": sharpe, "days": duration,
+        "total_return": s["total"], "annual_return": s["ann"],
+        "max_drawdown": s["dd"],
+        "sharpe": s["sharpe"], "days": duration,
         "avg_position": float(np.mean(actions)),
         "pct_cash": float(np.mean(np.array(actions) == 0.0)),
         "pct_full": float(np.mean(np.array(actions) == 1.0)),
@@ -232,7 +242,7 @@ def main() -> None:
     df = load_market(_resolve_db())
     print(f"数据: {df['date'].min().date()} ~ {df['date'].max().date()}（{len(df)} 天）")
 
-    feat_cols = ["ret5", "ret20", "vol10", "regime10", "regime20", "vol_regime", "run_len", "ret"]
+    feat_cols = ["ret5", "ret20", "vol10", "regime10", "regime20", "vol_regime", "run_len"]
     feats = df[feat_cols].values.astype(np.float32)
     rets = df["ret"].values.astype(np.float32)
 
@@ -243,7 +253,8 @@ def main() -> None:
 
     print(f"训练段: 0 ~ {n_train}   测试段: {n_train} ~ {n}")
 
-    env = Env(feats, rets, args.cost, args.dd_lambda, args.dd_free, args.horizon, FEATS_MU, FEATS_SD)
+    env = Env(feats[:n_train], rets[:n_train], args.cost, args.dd_lambda,
+              args.dd_free, args.horizon, FEATS_MU, FEATS_SD, n_allowed=n_train)
     policy = Policy()
     opt = optim.Adam(policy.parameters(), lr=args.lr)
 
@@ -257,20 +268,15 @@ def main() -> None:
             probs = policy(x)
             dist = torch.distributions.Categorical(probs)
             a = dist.sample()
-            log_probs.append(dist.log_prob(a))
+            # ★ 知微审查 2026-10-31：压成标量，杜绝 [T,1]×[T] 广播
+            log_probs.append(dist.log_prob(a).squeeze(-1))
             obs, r, done = env.step(int(a.item()))
             rewards.append(r)
 
-        # REINFORCE + baseline（用回报均值做基线，降方差）
-        R = 0.0
-        returns = []
-        for r in reversed(rewards):
-            R = r + 0.99 * R
-            returns.append(R)
-        returns = torch.tensor(list(reversed(returns)), dtype=torch.float32)
-        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
-
-        loss = -(torch.stack(log_probs) * returns).mean()
+        if len(log_probs) < 2:
+            continue
+        returns = discounted_returns(rewards, gamma=0.99)
+        loss = paired_policy_loss(log_probs, returns, normalize=True)
         opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(policy.parameters(), 1.0)

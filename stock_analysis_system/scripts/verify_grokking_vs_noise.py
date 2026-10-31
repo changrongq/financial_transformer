@@ -51,6 +51,7 @@ from torch.distributions import Categorical
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rl_overlay_on_timing as R
+from rl_algo_utils import paired_policy_loss, discounted_returns
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "results"
@@ -68,44 +69,44 @@ def train_with_curve(df, n_train, mu, sd, args, seed, snapshot_every=100):
     norm = np.clip((sub_tr[R.FEAT_COLS].values.astype(np.float32) - mu) / sd, -5, 5).astype(np.float32)
     sig = sub_tr["signal_hold"].values
     ret = sub_tr["ret"].values.astype(np.float64)
+    gap_a = sub_tr["gap"].values.astype(np.float64)
+    intra_a = sub_tr["intraday"].values.astype(np.float64)
 
     curve_snapshots = []
     ent_snapshots = []
 
     for ep in range(1, args.episodes + 1):
         start = np.random.randint(5, max(6, n_train - 300))
-        eq = 1.0
+        end = min(start + 300, n_train)
         pos = 1.0
         lps, rewards = [], []
-        for i in range(start + 1, min(start + 300, n_train)):
-            if sig[i - 1]:
-                target = 1.0
-            else:
-                x = torch.from_numpy(norm[i]).unsqueeze(0)
+        for i in range(start + 1, end):
+            # ★ 知微审查 2026-10-31 修正：
+            #   (1) 特征用 norm[i-1]，不用 norm[i]（避免未来函数）
+            #   (2) 只在 RL 决策日记录 log_prob，保证 K == T
+            #   (3) 记账拆成 隔夜(旧仓位) + 日内(新仓位)
+            is_rl = not sig[i - 1]
+            if is_rl:
+                x = torch.from_numpy(norm[i - 1]).unsqueeze(0)
                 p = pol(x)
                 d = Categorical(p)
                 a = d.sample()
-                lps.append(d.log_prob(a))
+                lps.append(d.log_prob(a).squeeze(-1))    # ★ 压成标量
                 target = R.CASH_POSITIONS[int(a.item())]
+            else:
+                target = 1.0
 
-            r_port = target * ret[i]
-            r_base = 0.0 if not sig[i - 1] else ret[i]
-            cost_pen = 0.0
-            if target != pos:
-                cost_pen = 2 * args.cost
-            rewards.append(r_port - r_base - cost_pen)
-            eq *= (1 + r_port - cost_pen)
+            prev = pos
+            cost_pen = (2 * args.cost) if target != prev else 0.0
+            day_ret = (1 + prev * gap_a[i]) * (1 + target * intra_a[i]) - 1.0
+
+            if is_rl:
+                rewards.append(day_ret - cost_pen)
             pos = target
 
-        if lps:
-            G, disc = 0.0, []
-            for r in reversed(rewards):
-                G = r + 0.99 * G
-                disc.append(G)
-            disc = torch.tensor(list(reversed(disc)), dtype=torch.float32)
-            if disc.std() > 1e-8:
-                disc = (disc - disc.mean()) / disc.std()
-            loss = -(torch.stack(lps) * disc).mean()
+        if len(lps) >= 2 and len(lps) == len(rewards):
+            disc = discounted_returns(rewards, gamma=0.99)
+            loss = paired_policy_loss(lps, disc, normalize=True)
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(pol.parameters(), 1.0)
@@ -116,8 +117,9 @@ def train_with_curve(df, n_train, mu, sd, args, seed, snapshot_every=100):
             c_tr, _, _ = R.rollout(sub_tr, None, args.cost, mu, sd, policy=pol, greedy=True)
             s_tr = R.stats(c_tr, n_train)
             # entropy：在 CASH 时刻的平均策略熵
-            cash_idx = np.where(~sig)[0]
-            cash_idx = cash_idx[cash_idx > 0][:200]
+            # ★ 与训练口径一致：用 i-1 的特征（第 i-1 日收盘可观测）
+            cash_idx = np.where(~sig)[0] - 1
+            cash_idx = cash_idx[(cash_idx > 0)][:200]
             if len(cash_idx):
                 with torch.no_grad():
                     xs = torch.from_numpy(norm[cash_idx])

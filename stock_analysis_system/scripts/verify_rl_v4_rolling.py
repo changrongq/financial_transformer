@@ -39,6 +39,7 @@ from torch.distributions import Categorical
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rl_timing_v4_variable_holding as R
+from rl_algo_utils import paired_policy_loss, discounted_returns
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_DIR = ROOT / "results"
@@ -57,13 +58,16 @@ def train_policy(feats, open_, close, n_train, args, seed):
     mu = feats[:n_train].mean(axis=0)
     sd = feats[:n_train].std(axis=0) + 1e-8
     env = R.Env(feats, open_, close, args.cost, args.dd_lambda, args.dd_free,
-                args.horizon, mu, sd)
+                args.horizon, mu, sd, n_allowed=n_train)
     pol = R.Policy()
     opt = optim.Adam(pol.parameters(), lr=args.lr)
     for ep in range(args.episodes):
-        obs = env.reset()
-        env.t = np.random.randint(0, max(1, n_train - args.horizon - 15))
-        env.start_t = env.t
+        # ★ 知微审查 2026-10-31 修正：
+        #   旧写法先 `obs = env.reset()` 再覆盖 `env.t`，导致传给模型的首个 obs
+        #   仍来自旧时点（可能在测试期），而收益从新时点开始算 —— 状态与收益错位。
+        #   正确做法：用 reset(start=...) 一次性建立一致状态。
+        start = np.random.randint(0, max(1, n_train - args.horizon - 15))
+        obs = env.reset(start=start)
         lps, rs = [], []
         done = False
         while not done:
@@ -71,16 +75,14 @@ def train_policy(feats, open_, close, n_train, args, seed):
             p = pol(x)
             d = Categorical(p)
             a = d.sample()
-            lps.append(d.log_prob(a))
+            # ★ 压成标量，杜绝 [T,1]×[T] 广播
+            lps.append(d.log_prob(a).squeeze(-1))
             obs, r, done = env.step(int(a.item()))
             rs.append(r)
-        G, disc = 0.0, []
-        for r in reversed(rs):
-            G = r + 0.99 * G
-            disc.append(G)
-        disc = torch.tensor(list(reversed(disc)), dtype=torch.float32)
-        disc = (disc - disc.mean()) / (disc.std() + 1e-8)
-        loss = -(torch.stack(lps) * disc).mean()
+        if len(lps) < 2:
+            continue
+        disc = discounted_returns(rs, gamma=0.99)
+        loss = paired_policy_loss(lps, disc, normalize=True)
         opt.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(pol.parameters(), 1.0)

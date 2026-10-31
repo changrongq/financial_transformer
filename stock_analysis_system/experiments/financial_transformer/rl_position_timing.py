@@ -261,8 +261,11 @@ def train(
                 probs = policy(torch.tensor(obs).unsqueeze(0))
                 dist = torch.distributions.Categorical(probs)
                 a = dist.sample()
-                log_probs.append(dist.log_prob(a))
-                entropies.append(dist.entropy())
+                # ★ 知微审查 2026-10-31：log_prob 必须压成标量
+                #   否则 torch.stack 得到 [T,1]，与 [T] 的 advantage 相乘
+                #   会广播成 [T,T]，动作与回报不再逐项配对。
+                log_probs.append(dist.log_prob(a).squeeze(-1))
+                entropies.append(dist.entropy().squeeze(-1))
                 obs, r, done = env.step(int(a.item()))
                 rewards.append(r)
             epoch_rewards.append(sum(rewards))
@@ -286,6 +289,10 @@ def train(
 
         logp = torch.stack(all_log_probs)
         ent = torch.stack(all_entropies).mean()
+        # ★ 断言：配对形状必须一致
+        if logp.ndim != 1 or logp.numel() != adv.numel():
+            raise AssertionError(
+                f"策略梯度配对失败: logp={tuple(logp.shape)} adv={tuple(adv.shape)}")
         policy_loss = -(logp * adv).mean()
         loss = policy_loss - entropy_coef * ent
 
