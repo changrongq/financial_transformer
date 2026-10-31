@@ -181,14 +181,29 @@ def build_layer_features(price_df: pd.DataFrame, market_cap_yi: float) -> pd.Dat
     turnover_rate_est = _safe_div(df["volume"], estimated_float_shares)
     turnover_change = turnover_rate.pct_change(fill_method=None) if "turnover_rate" in df else turnover_rate_est.pct_change(fill_method=None)
     money_flow_proxy = _safe_div(amount, market_cap_yi * 1e8)
-    net_mf_amount = pd.to_numeric(df.get("净流入额", np.nan), errors="coerce")
+
+    # ★ BUGFIX 2026-10-31（知微复核后续审计发现）：
+    #   原实现假定资金流列一定存在。当某只股票在 stock_moneyflow 里
+    #   没有记录时，`df.get("净流入额", np.nan)` 返回**标量** np.nan，
+    #   `pd.to_numeric(np.nan)` 也是标量，
+    #   `pd.concat([标量, ...])` 直接抛 TypeError:
+    #     "cannot concatenate object of type '<class 'float'>'"
+    #   实测 000005 走生产路径即崩溃（无资金流数据）。
+    #   修复：统一用 Series（缺失时构造全 NaN 的 Series）。
+    def _mf_series(column_name: str) -> pd.Series:
+        if column_name in df.columns:
+            return pd.to_numeric(df[column_name], errors="coerce")
+        return pd.Series(np.nan, index=df.index, dtype=float)
+
+    net_mf_amount = _mf_series("净流入额")
+
     moneyflow_source_missing = pd.concat(
         [
-            pd.to_numeric(df.get("净流入额", np.nan), errors="coerce"),
-            pd.to_numeric(df.get("大单买入额", np.nan), errors="coerce"),
-            pd.to_numeric(df.get("大单卖出额", np.nan), errors="coerce"),
-            pd.to_numeric(df.get("特大单买入额", np.nan), errors="coerce"),
-            pd.to_numeric(df.get("特大单卖出额", np.nan), errors="coerce"),
+            _mf_series("净流入额"),
+            _mf_series("大单买入额"),
+            _mf_series("大单卖出额"),
+            _mf_series("特大单买入额"),
+            _mf_series("特大单卖出额"),
         ],
         axis=1,
     ).isna().all(axis=1)
