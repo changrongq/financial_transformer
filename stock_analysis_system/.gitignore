@@ -41,3 +41,4 @@ config.yaml
 config.yaml.backup_*
 .env
 logs_preclose.txt
+logs_moneyflow.txt
