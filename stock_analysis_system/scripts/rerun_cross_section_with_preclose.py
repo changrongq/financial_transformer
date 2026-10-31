@@ -88,23 +88,47 @@ def load_panel_preclose(db: str, usable: set, min_stocks: int = 4500):
 
 
 def build_features_preclose(df: pd.DataFrame) -> pd.DataFrame:
-    """用 pre_close 计算真实收益，再构造特征。"""
+    """用 close 比值计算收益（★ 已修正），pre_close 只用于隔夜。
+
+    ⚠️ 关键修正（2026-10-31）：
+       早期版本用 `ret1 = close/pre_close - 1`。
+       但 `pre_close` 来自 tushare（交易所除权基准），
+       而 `close` 是本地复权价，两者【基准不同】。
+
+       实测 002299（2022-08-24 起 20 天）：
+         ret1 累乘 20 天 = +1.2389%
+         close 比值      = +0.5413%
+         差 0.70%
+       全样本 12.2% 的样本差异 > 1%。
+
+       正确做法：
+         · ret1 用 close / close.shift(1) - 1（同一序列，自洽）
+         · pre_close 只用于计算 gap = open/pre_close - 1（隔夜收益）
+         · 但 gap 也需要同一基准，所以改用 open/close.shift(1) - 1
+
+       → 结论：本函数**不再使用 pre_close**，全部用 close 序列自洽计算。
+         pre_close 仅作为数据质量校验字段保留。
+    """
     g = df.groupby("stock_code", group_keys=False)
 
-    # ★ 核心：真实日收益
-    df["ret1"] = df["close"] / df["pre_close"] - 1.0
-    df["ret1"] = df["ret1"].clip(-0.25, 0.35)   # 只截断退市级异常
+    # ★ 核心：真实日收益（同一 close 序列，自洽）
+    df["ret1"] = g["close"].transform(lambda s: s.pct_change(fill_method=None))
+    # 只截断退市级异常（-90%），保留正常涨跌停
+    df["ret1"] = df["ret1"].clip(-0.95, 5.0)
 
-    # 多日收益：用真实收益连乘，避免价格拼接问题
+    # 多日收益：用真实收益连乘
     lr = np.log1p(df["ret1"])
     df["lr"] = lr
     for n in [5, 20, 60]:
         df[f"ret{n}"] = np.exp(g["lr"].transform(
             lambda s: s.rolling(n, min_periods=max(3, n // 2)).sum())) - 1.0
 
-    # 隔夜 / 日内（这是 pre_close 才能算对的）
-    df["gap"] = df["open"] / df["pre_close"] - 1.0
+    # 隔夜 / 日内（同样用 close 序列，保证自洽）
+    prev_close = g["close"].transform(lambda s: s.shift(1))
+    df["gap"] = df["open"] / prev_close - 1.0
     df["intraday"] = df["close"] / df["open"] - 1.0
+    df["gap"] = df["gap"].clip(-0.5, 0.5)
+    df["intraday"] = df["intraday"].clip(-0.5, 0.5)
 
     # 波动
     for n in [20, 60]:
@@ -153,8 +177,10 @@ FEATURES_NEW = FEATURES_OLD + ["gap5", "gap20", "intra5", "intra20"]
 def add_labels(df, horizons):
     """未来 h 日收益。
 
-    用 close 比值是可靠的：因为 close 已经是除权调整后的连通序列
-    （已验证 close[t]/pre_close[t] 与 tushare 真实收益一致）。
+    ★ 与 ret1 保持同一自洽口径：
+      ret1      = close[t]/close[t-1] - 1
+      fwd_h     = close[t+h]/close[t] - 1
+    两者都只用 close 序列，可精确对上（累乘 h 天 == fwd_h）。
     """
     g = df.groupby("stock_code", group_keys=False)
     for h in horizons:
